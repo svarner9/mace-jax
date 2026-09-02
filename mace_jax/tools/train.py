@@ -96,7 +96,11 @@ def _sanitize_grads(grads):
         arr = jnp.asarray(leaf)
         if 'float0' in str(arr.dtype):
             arr = jnp.zeros_like(arr, dtype=jnp.float32)
-        return jnp.nan_to_num(arr)
+        # JAX's defaults replace +/-inf with the largest finite value.  The
+        # subsequent global-norm calculation then overflows and produces a
+        # zero clip coefficient for the *entire* gradient tree.  Nonfinite
+        # entries are invalid gradients, so mask all three cases to zero.
+        return jnp.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
 
     return jax.tree_util.tree_map(_sanitize, grads)
 

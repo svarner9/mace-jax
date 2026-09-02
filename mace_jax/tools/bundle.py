@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import pickle
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -84,11 +84,35 @@ def _load_checkpoint_bundle(path: Path, dtype: str) -> ModelBundle:
     if isinstance(state_payload, (bytes, bytearray)):
         state_pure = serialization.from_bytes(state_template, state_payload)
     else:
-        state_pure = state_payload
+        state_pure = _unwrap_training_state(state_payload)
     _replace_state_with_specials(state, state_pure)
     state_pure = state_to_pure_dict(state)
     _validate_config_matches_params(model_config, state_pure, context=str(path))
     return ModelBundle(config=model_config, params=state_pure, graphdef=graphdef)
+
+
+def _merge_pure_state(base: Mapping | None, updates: Mapping | None) -> dict:
+    """Recursively merge disjoint NNX parameter/config pure-state trees."""
+    merged = dict(base or {})
+    for key, value in (updates or {}).items():
+        if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+            merged[key] = _merge_pure_state(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _unwrap_training_state(state_payload):
+    """Convert the trainer's ``params/config`` wrapper into a full NNX state."""
+    if (
+        isinstance(state_payload, Mapping)
+        and 'params' in state_payload
+        and 'config' in state_payload
+    ):
+        return _merge_pure_state(
+            state_payload.get('config'), state_payload.get('params')
+        )
+    return state_payload
 
 
 def load_model_bundle(

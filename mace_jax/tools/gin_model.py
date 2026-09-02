@@ -245,7 +245,10 @@ def u_envelope(length, max_length, p: int):
 
 @gin.configurable
 def _graph_to_data(
-    graph: jraph.GraphsTuple, *, num_species: int
+    graph: jraph.GraphsTuple,
+    *,
+    num_species: int,
+    padded_edge_length: float | None = None,
 ) -> dict[str, jnp.ndarray]:
     """Convert a (possibly padded) graph into the MACE data dictionary.
 
@@ -302,7 +305,12 @@ def _graph_to_data(
         'batch': batch,
         'ptr': ptr,
         'cell': cell,
+        'edge_mask': jraph.get_edge_padding_mask(graph).astype(bool),
     }
+    if padded_edge_length is not None:
+        data_dict['padded_edge_length'] = jnp.asarray(
+            padded_edge_length, dtype=positions.dtype
+        )
 
     unit_shifts = getattr(graph.edges, 'unit_shifts', None)
     if unit_shifts is None:
@@ -317,6 +325,64 @@ def _graph_to_data(
         data_dict['head'] = jnp.asarray(head_attr, dtype=jnp.int32).reshape(-1)
 
     return data_dict
+
+
+def _apply_output_normalization(
+    outputs: dict[str, jnp.ndarray],
+    graph: jraph.GraphsTuple,
+    *,
+    mean=0.0,
+    std=1.0,
+) -> dict[str, jnp.ndarray]:
+    """Restore the physical output units used by the training predictor.
+
+    The from-scratch gin model historically applies this affine transform
+    outside the serialized MACE module.  Checkpoint inference must therefore
+    replay it explicitly.
+    """
+    normalized = dict(outputs)
+    graph_mask = jraph.get_graph_padding_mask(graph).astype(default_dtype())
+    node_mask = jraph.get_node_padding_mask(graph).astype(default_dtype())
+    graph_heads = getattr(graph.globals, 'head', None)
+    if graph_heads is None:
+        graph_heads = jnp.zeros_like(graph.n_node, dtype=jnp.int32)
+    else:
+        graph_heads = jnp.asarray(graph_heads, dtype=jnp.int32).reshape(-1)
+
+    mean_arr = jnp.asarray(mean, dtype=default_dtype())
+    std_arr = jnp.asarray(std, dtype=default_dtype())
+    mean_graph = mean_arr if mean_arr.ndim == 0 else mean_arr[graph_heads]
+    std_graph = std_arr if std_arr.ndim == 0 else std_arr[graph_heads]
+
+    energy = normalized.get('energy')
+    if energy is not None:
+        normalized['energy'] = (
+            std_graph * jnp.nan_to_num(energy) + mean_graph * graph.n_node
+        ) * graph_mask
+
+    forces = normalized.get('forces')
+    if forces is not None:
+        if std_arr.ndim == 0:
+            force_scale = std_graph
+        else:
+            force_scale = jnp.repeat(
+                std_graph,
+                graph.n_node,
+                total_repeat_length=forces.shape[0],
+            )[:, None]
+        normalized['forces'] = (
+            force_scale * jnp.nan_to_num(forces) * node_mask[:, None]
+        )
+
+    for key in ('stress', 'virials'):
+        value = normalized.get(key)
+        if value is None:
+            continue
+        scale = std_graph if std_arr.ndim == 0 else std_graph[:, None, None]
+        normalized[key] = (
+            scale * jnp.nan_to_num(value) * graph_mask[:, None, None]
+        )
+    return normalized
 
 
 @gin.configurable
@@ -500,7 +566,11 @@ def model(
             compute_stress: bool = False,
         ) -> dict[str, jnp.ndarray]:
             """Apply the converted Torch model to a `GraphsTuple` input."""
-            data_dict = _graph_to_data(graph, num_species=num_species_local)
+            data_dict = _graph_to_data(
+                graph,
+                num_species=num_species_local,
+                padded_edge_length=r_max + 1.0,
+            )
             if torch_head is not None:
                 head_names = config.get('heads') or []
                 if torch_head not in head_names:
@@ -825,7 +895,11 @@ def model(
                 nodes=sanitized_nodes, edges=sanitized_edges, globals=sanitized_globals
             )
 
-            data_dict = _graph_to_data(sanitized_graph, num_species=num_species_local)
+            data_dict = _graph_to_data(
+                sanitized_graph,
+                num_species=num_species_local,
+                padded_edge_length=r_max + 1.0,
+            )
             outputs = predict_fn(
                 state_local,
                 data_dict,
@@ -833,50 +907,14 @@ def model(
                 compute_stress=compute_stress,
             )
 
-            # Apply optional rescaling consistent with the historical Haiku version.
-            num_nodes = graph.n_node.astype(default_dtype())
-            graph_heads = getattr(graph.globals, 'head', None)
-            if graph_heads is None:
-                graph_heads = jnp.zeros_like(graph.n_node, dtype=jnp.int32)
-            else:
-                graph_heads = jnp.asarray(graph_heads, dtype=jnp.int32).reshape(-1)
-
-            mean_arr = jnp.asarray(mean, dtype=default_dtype())
-            std_arr = jnp.asarray(std, dtype=default_dtype())
-            if mean_arr.ndim == 0:
-                mean_graph = mean_arr
-            else:
-                mean_graph = mean_arr[graph_heads]
-            if std_arr.ndim == 0:
-                std_graph = std_arr
-            else:
-                std_graph = std_arr[graph_heads]
-
-            energy = outputs.get('energy')
-            if energy is not None:
-                energy = std_graph * jnp.nan_to_num(energy) + mean_graph * num_nodes
-                energy = energy * graph_mask
-
-            forces = outputs.get('forces')
-            if forces is not None:
-                if std_arr.ndim == 0:
-                    forces = std_graph * jnp.nan_to_num(forces)
-                else:
-                    node_scale = jnp.repeat(
-                        std_graph, graph.n_node, total_repeat_length=forces.shape[0]
-                    )
-                    forces = node_scale[:, None] * jnp.nan_to_num(forces)
-                forces = forces * node_mask[:, None]
-
-            stress = outputs.get('stress')
-            if stress is not None:
-                stress = std_graph * jnp.nan_to_num(stress)
-                stress = stress * graph_mask[:, None, None]
+            outputs = _apply_output_normalization(
+                outputs, graph, mean=mean, std=std
+            )
 
             return {
-                'energy': energy,
-                'forces': forces,
-                'stress': stress,
+                'energy': outputs.get('energy'),
+                'forces': outputs.get('forces'),
+                'stress': outputs.get('stress'),
             }
 
         return apply_fn
@@ -896,6 +934,8 @@ def model(
             {'params': params, 'config': config_state} if config_state else params
         )
         model_config = _export_model_config(mace_module)
+        model_config['output_mean'] = _serialize_config_value(mean)
+        model_config['output_std'] = _serialize_config_value(std)
 
         def _predict(state_local, data_dict, *, compute_force, compute_stress):
             outputs, _ = graphdef.apply(state_local)(
@@ -915,10 +955,16 @@ def model(
         raise ValueError('train_graphs is required to initialize non-NNX MACE modules.')
 
     sample_graph = train_graphs[0]
-    data_dict = _graph_to_data(sample_graph, num_species=num_species)
+    data_dict = _graph_to_data(
+        sample_graph,
+        num_species=num_species,
+        padded_edge_length=r_max + 1.0,
+    )
     params = mace_module.init(jax.random.PRNGKey(initialize_seed or 0), data_dict)
     params_bundle = params
     model_config = _export_model_config(mace_module)
+    model_config['output_mean'] = _serialize_config_value(mean)
+    model_config['output_std'] = _serialize_config_value(std)
 
     def _predict(state_local, data_dict, *, compute_force, compute_stress):
         return mace_module.apply(

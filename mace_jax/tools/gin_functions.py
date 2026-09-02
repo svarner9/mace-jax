@@ -280,6 +280,9 @@ def _required_targets_from_log_errors(
         'PerAtomMAE',
         'rel_PerAtomMAE',
         'TotalMAE',
+    }:
+        required.update({'energy', 'forces'})
+    elif selection in {
         'PerAtomRMSEstressvirials',
         'PerAtomMAEstressvirials',
     }:
