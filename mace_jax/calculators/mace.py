@@ -36,10 +36,17 @@ class MACEJAXCalculator(Calculator):
         length_units_to_A: float = 1.0,
         default_dtype='float64',
         atomic_numbers: list[int] | None = None,
+        graph_transform: Callable | None = None,
         **kwargs,
     ):
+        """
+        :param graph_transform: optional host-side function applied to the padded
+            ``jraph.GraphsTuple`` before the model sees it; MACE-LES uses it to attach the
+            Ewald k-grid (``mace_jax.training.les.attach_kgrid``).
+        """
         Calculator.__init__(self, **kwargs)
         self.results = {}
+        self.graph_transform = graph_transform
         self.model = model
         self.params = stop_grad(params)
         self.predictor = jax.jit(
@@ -93,6 +100,8 @@ class MACEJAXCalculator(Calculator):
             n_edge=self.min_n_edge,
             n_graph=2,
         )
+        if self.graph_transform is not None:
+            graph = self.graph_transform(graph)
         # predict + extract data
         out = self.predictor(self.params, graph)
         energy = np.array(jax.lax.stop_gradient(out['energy']))[0]

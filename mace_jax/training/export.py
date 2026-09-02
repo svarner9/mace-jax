@@ -162,12 +162,34 @@ def ase_calculator(path: str | Path, dtype: str = 'float32'):
         lambda x: x.astype(jnp.dtype(dtype)) if hasattr(x, 'dtype') and jnp.issubdtype(x.dtype, jnp.floating) else x,
         bundle.params,
     )
+    graph_transform = None
+    if _model_class(config) == 'LESMACE':
+        # MACE-LES needs the Ewald k-grid of the structure's cell in the graph; the trainer attaches
+        # it per batch, the calculator per structure (its exact size, so a new cell size recompiles).
+        from les_jax.ewald import build_kgrid  # noqa: PLC0415
+
+        from .les import attach_kgrid  # noqa: PLC0415
+
+        dl = float((config.get('les') or {}).get('dl', 2.0))
+
+        def graph_transform(graph):
+            cells = np.asarray(graph.globals.cell, dtype=np.float64).reshape(-1, 3, 3)
+            pbc = np.asarray(graph.globals.pbc, dtype=bool).reshape(-1, 3)
+            num_k = max(
+                (build_kgrid(c, dl=dl).shape[0] for c, p in zip(cells, pbc) if p.any()),
+                default=0,
+            )
+            if num_k == 0:
+                return graph  # non-periodic: real-space branch only
+            return attach_kgrid(graph, num_k=num_k, dl=dl)
+
     return MACEJAXCalculator(
         model=model,
         params=params,
         r_max=r_max,
         default_dtype=dtype,
         atomic_numbers=[int(z) for z in config['atomic_numbers']],
+        graph_transform=graph_transform,
     )
 
 

@@ -352,3 +352,11 @@ def test_maceles_trains_on_periodic_data_and_exports_directory_bundle(periodic_x
     assert np.isfinite(energy) and np.all(np.isfinite(forces))
     fd = _finite_difference_forces(atoms, calc)
     assert np.abs(forces - fd).max() < 5e-4, np.abs(forces - fd).max()
+    # the reciprocal-space Ewald term is active: without the k-grid the model would silently fall
+    # back to the real-space branch and give a different energy
+    assert calc.graph_transform is not None
+    calc.graph_transform = None
+    calc.results = {}
+    atoms.calc = calc
+    energy_without_kgrid = atoms.get_potential_energy()
+    assert abs(energy_without_kgrid - energy) > 1e-6
