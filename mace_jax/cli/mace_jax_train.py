@@ -1340,6 +1340,28 @@ def _maybe_wrap_les_loaders(train_loader, valid_loader, test_loader):
     return train_loader, valid_loader, test_loader
 
 
+def _bind_atomic_numbers_from_loader(train_loader) -> None:
+    """Give the model the element table when the config does not name one.
+
+    The loader maps atomic numbers to species indices with its `z_table`; the model needs the same
+    table to place the E0s (keyed by atomic number) into species order and to record
+    `atomic_numbers` in the exported config. Without this binding a run that gave neither
+    `--atomic-numbers` nor a statistics file ended up with atomic_numbers = (0, 1, ...) and E0s in
+    the wrong slots.
+    """
+    if _query_gin('mace_jax.tools.gin_model.model.atomic_numbers', None) is not None:
+        return
+    z_table = getattr(train_loader, 'z_table', None)
+    zs = getattr(z_table, 'zs', None)
+    if not zs:
+        return
+    with gin.unlock_config():
+        gin.bind_parameter(
+            'mace_jax.tools.gin_model.model.atomic_numbers', tuple(int(z) for z in zs)
+        )
+    logging.info('Model element table from the training data: %s', tuple(int(z) for z in zs))
+
+
 def run_training() -> dict:
     """Run one training job from the current gin configuration.
 
@@ -1384,6 +1406,7 @@ def run_training() -> dict:
         train_loader, valid_loader, test_loader = _maybe_wrap_les_loaders(
             train_loader, valid_loader, test_loader
         )
+        _bind_atomic_numbers_from_loader(train_loader)
 
         wandb_run = _start_wandb(
             is_primary=is_primary,

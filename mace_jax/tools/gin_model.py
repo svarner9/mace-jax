@@ -215,14 +215,15 @@ def _atomic_energies_by_species(
                 f'available: {sorted(keys)}'
             )
         return np.array([keys[z] for z in zs], dtype=float)
-    # no element table: the dict must already be keyed by species index
-    missing = [i for i in range(num_species) if i not in keys]
-    if missing:
-        raise ValueError(
-            f'atomic_energies is keyed by {sorted(keys)} but species indices {missing} are '
-            'missing; pass atomic_numbers so the entries can be matched by element'
-        )
-    return np.array([keys[i] for i in range(num_species)], dtype=float)
+    # No element table given. The loader assigns species indices in ascending order of atomic
+    # number (AtomicNumberTable sorts), so a dict with exactly num_species entries is in species
+    # order once sorted by key; anything else is ambiguous and an error.
+    if len(keys) == num_species:
+        return np.array([keys[z] for z in sorted(keys)], dtype=float)
+    raise ValueError(
+        f'atomic_energies has {len(keys)} entries (keys {sorted(keys)}) for num_species='
+        f'{num_species}; pass atomic_numbers so the entries can be matched by element'
+    )
 
 
 @gin.configurable
@@ -847,10 +848,21 @@ def model(
     if kwargs.get('heads') is not None:
         kwargs['heads'] = pt_head_first(kwargs['heads'])
     logging.info(f'Create MACE with parameters {kwargs}')
-    kwargs.setdefault(
-        'atomic_numbers',
-        tuple(z_table.zs) if z_table is not None else tuple(range(num_species)),
-    )
+    if kwargs.get('atomic_numbers') is None:
+        # Element table not configured: take it from the E0 dict (keyed by atomic number, one
+        # entry per species, ascending like the loader's species indices) rather than pretending
+        # the species indices are atomic numbers.
+        inferred = None
+        if isinstance(atomic_energies_dict, dict) and len(atomic_energies_dict) == num_species:
+            inferred = tuple(sorted(int(k) for k in atomic_energies_dict))
+            if inferred == tuple(range(num_species)) and z_table is not None:
+                inferred = tuple(int(z) for z in z_table.zs)
+        kwargs['atomic_numbers'] = (
+            inferred
+            if inferred is not None
+            else (tuple(z_table.zs) if z_table is not None else tuple(range(num_species)))
+        )
+        logging.info('Model element table: %s', kwargs['atomic_numbers'])
     kwargs.setdefault('atomic_energies', atomic_energies)
 
     num_species_bound = kwargs.pop('num_species', None)
