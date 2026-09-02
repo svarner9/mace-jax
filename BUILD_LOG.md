@@ -156,3 +156,20 @@ Bundle/trainer consistency on the 6-epoch MACE-LES water model (before the E0 fi
 validation frames through `mace_jax_eval_configs` (ASE calculator path, per-structure k-grid):
 E-RMSE 76.98 meV/atom, F-RMSE 68.57 meV/Å versus the trainer's own 76.78 / 68.44 — the exported
 bundle is the trained model. Both GPU runs resubmitted with the E0 fix (jobs 16792157, 16792158).
+
+## 2026-09-02 — GPU validation rerun after the E0 fix, C–C dataset (job 16792157, H200)
+
+Same `cc_scaleshift.sbatch` as before (swC, ScaleShiftMACE, float64, 25 epochs, 9.2 s/epoch).
+Bundle now carries `atomic_energies = [−15.586, −299.844, −149.922]` for Z = [1, 6, 8].
+
+| epoch | valid E (meV/atom) | valid F (meV/Å) | test E | test F |
+|---|---|---|---|---|
+| 5  | 18.0 | 120.2 | 25.9 | 247.8 |
+| 10 | 19.8 |  81.3 | 24.1 | 154.8 |
+| 20 | 18.4 |  58.1 | 21.1 | 109.9 |
+| 25 | 18.0 |  51.0 | 20.1 | 116.7 |
+
+Before the fix, same run: valid E 466 / F 96 meV/Å, test E 464 / F 135 at epoch 25. The owner's
+500-epoch run (external normalization, same E0 defect) ended at valid F 54 meV/Å with E 410
+meV/atom. With correct E0s the energies fit from epoch 2 and the forces converge about twice as
+fast: the readouts no longer spend capacity reproducing −100 eV/atom per element.
