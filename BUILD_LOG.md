@@ -94,3 +94,23 @@ raises. Full suite after all changes: **202 passed, 36 skipped, 0 failed** (3:52
 Cluster notes: runs go through `env/mace-jax.sh` (this checkout first on PYTHONPATH inside the
 group's Singularity image; caches under `$SCRATCH/.cache/mace-jax`); `stdbuf -oL` so the log survives
 the ~2 h external kill; `--time 1:50`.
+
+## 2026-09-02 — GPU validation, MACE-LES (job 16780201, L40S)
+
+`runs/slurm/water_les.sbatch`: 1000 training / 200 validation frames of revPBE-D3 water (384 atoms,
+periodic; 20 validation frames have 768), MACELES 128x0e+128x1o, max_ell 2, r_max 4, float32,
+batch_size 6 → `batch_max_edges=67158` (168 batches/epoch), E0s fitted (H −187.86, O −93.93 eV
+from the full set in the earlier run; here fitted on the subset), scale = RMS force 0.7916 eV/Å.
+
+- Preprocessing 1000+200 frames: 6 s. k-grid scan: 1200 cells, `num_k = 6859` (19³), all periodic.
+- Compile + first epoch 129 s; steady state **14.3 s/epoch** (168 batches, ~12 batches/s).
+- Validation: F-RMSE 924 → 1136 → 166 → 110 → 88 → 76 → **68.4 meV/Å** after 6 epochs;
+  E-RMSE 77 meV/atom with MAE ≈ RMSE (a per-atom offset the 10:100 energy:force weighting has not
+  removed after six epochs on 1000 frames; the full 400-epoch run with stage two is what reaches
+  the 0.2 meV/atom class). Loss monotone from epoch 2. Bundle exported
+  (`20260902_0243_water_les_les/config.json + params.msgpack`).
+- Found while evaluating the bundle: `ase_calculator` did not attach the k-grid for MACE-LES, so
+  `mace_jax_eval_configs` would have evaluated the real-space branch only (training and mlmd attach
+  their own grids and were correct). Fixed (`MACEJAXCalculator(graph_transform=...)`), the LES e2e
+  test now asserts the reciprocal term changes the energy, the job's evaluation step was cancelled
+  and resubmitted as `water_les_eval.sbatch` (job 16780533).
