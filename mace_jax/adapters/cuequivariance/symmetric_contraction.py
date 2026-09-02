@@ -20,6 +20,8 @@ weights that is expected during the conversion.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import cache
 
 import cuequivariance_jax as cuex
@@ -42,6 +44,29 @@ from mace_jax.nnx_utils import state_to_pure_dict
 from mace_jax.tools.dtype import default_dtype
 
 from .utility import ir_mul_to_mul_ir
+
+
+_NATIVE_IMPORT_USE_REDUCED_CG: ContextVar[bool | None] = ContextVar(
+    'native_symmetric_contraction_import_use_reduced_cg', default=None
+)
+
+
+@contextmanager
+def native_symmetric_contraction_import_mode(use_reduced_cg: bool | None):
+    """Disambiguate native Torch weight layouts during recursive imports.
+
+    Full and reduced CG bases occasionally have the same dimension even though
+    they use different coordinates.  Shape-only inference is therefore not
+    sufficient; model- and module-level import entry points set this context
+    from the target JAX configuration.
+    """
+    token = _NATIVE_IMPORT_USE_REDUCED_CG.set(
+        None if use_reduced_cg is None else bool(use_reduced_cg)
+    )
+    try:
+        yield
+    finally:
+        _NATIVE_IMPORT_USE_REDUCED_CG.reset(token)
 
 
 @nxx_auto_import_from_torch(allow_missing_mapper=True)
@@ -421,13 +446,15 @@ def _select_weights(
     selector = jnp.asarray(selector)
     if selector.ndim == 1:
         idx = selector.astype(jnp.int32)
-        invalid = jnp.any(idx < 0) | jnp.any(idx >= num_elements)
-
-        def _raise(_):
-            jax.debug.callback(_raise_invalid_indices, jnp.int32(0))
-            return jnp.int32(0)
-
-        jax.lax.cond(invalid, _raise, lambda _: jnp.int32(0), operand=jnp.int32(0))
+        # Validate concrete/eager inputs, but do not put an effectful host
+        # callback in the compiled numerical program.  In particular, vmap
+        # lowers a batched lax.cond to a select and executes both branches, so
+        # the previous callback raised even for entirely valid indices.  It
+        # also forced a host callback into every hot-path contraction.
+        if not isinstance(idx, jax.core.Tracer):
+            idx_np = np.asarray(idx)
+            if np.any(idx_np < 0) or np.any(idx_np >= num_elements):
+                _raise_invalid_indices(idx_np, np.asarray(num_elements))
         return weight_flat[idx]
 
     if selector.ndim == 2:
@@ -439,8 +466,12 @@ def _select_weights(
     raise ValueError('indices must be rank-1 (element ids) or rank-2 (mixing matrix)')
 
 
-def _raise_invalid_indices(_: jnp.ndarray) -> None:
-    raise ValueError('indices out of range for the available elements')
+def _raise_invalid_indices(indices: jnp.ndarray, num_elements: jnp.ndarray) -> None:
+    indices = np.asarray(indices)
+    raise ValueError(
+        'indices out of range for the available elements: '
+        f'min={int(indices.min())}, max={int(indices.max())}, '
+        f'num_elements={int(num_elements)}')
 
 
 ## Import functions
@@ -478,6 +509,7 @@ def _import_native_symmetric_contraction(module, variables, scope) -> None:
     converted = _convert_native_weights(
         module,
         target_template=jnp.asarray(weight, dtype=default_dtype()),
+        source_uses_reduced_cg=_NATIVE_IMPORT_USE_REDUCED_CG.get(),
     )
     target['weight'] = jnp.asarray(converted, dtype=weight.dtype)
 
@@ -490,6 +522,7 @@ def _convert_native_weights(
     torch_module,
     *,
     target_template: jnp.ndarray,
+    source_uses_reduced_cg: bool | None = None,
 ) -> jnp.ndarray:
     """Convert native MACE weights into the layout expected by the JAX module.
 
@@ -562,7 +595,21 @@ def _convert_native_weights(
     full_dim = descriptor_projection.shape[0]
     native_dim = native_weight.shape[1]
 
-    if basis_dim == reduced_dim:
+    # When the full and reduced spaces happen to have equal dimensions (for
+    # example a scalar-only correlation-2 output), dimensions alone cannot tell
+    # which native coordinate system is stored.  Prefer the explicit model
+    # configuration supplied by the import entry point in that ambiguous case.
+    if (
+        source_uses_reduced_cg is False
+        and basis_dim == full_dim
+        and native_dim == full_dim
+    ):
+        transform = _compute_full_cg_transform(irreps_in, irreps_out, correlation)
+        transform = np.asarray(transform, dtype=native_weight.dtype)
+        converted = np.einsum(
+            'ab,zbu->zau', transform, native_weight, optimize=True
+        )
+    elif basis_dim == reduced_dim:
         if native_dim == reduced_dim:
             converted = np.einsum(
                 'zau,ab->zbu', native_weight, reduced_projection, optimize=True
@@ -671,7 +718,36 @@ def _compute_full_cg_transform(
     """
     base_in = Irreps(str(irreps_in)).set_mul(1)
     base_out = Irreps(str(irreps_out)).set_mul(1)
-    return _cached_full_cg_transform(str(base_in), str(base_out), int(correlation))
+    precision = 'x64' if jax.config.x64_enabled else 'x32'
+    return _cached_full_cg_transform(
+        str(base_in), str(base_out), int(correlation), precision
+    )
+
+
+def _transform_disk_cache_path(
+    irreps_in_str: str,
+    irreps_out_str: str,
+    correlation: int,
+    precision: str,
+):
+    """Optional cross-process cache for the full-CG transform.
+
+    The transform is only fp64-exact when computed with JAX x64 enabled (the
+    canonical design matrix is evaluated through the JAX module). A production
+    fp32 process cannot compute it at full precision, so an fp64 process may
+    persist it via MACE_JAX_CG_TRANSFORM_CACHE=<dir> and fp32 processes reuse it.
+    """
+    import hashlib
+    import os
+    import pathlib
+
+    cache_dir = os.environ.get('MACE_JAX_CG_TRANSFORM_CACHE')
+    if not cache_dir:
+        return None
+    key = hashlib.sha256(
+        f'{irreps_in_str}|{irreps_out_str}|{correlation}'.encode()
+    ).hexdigest()[:24]
+    return pathlib.Path(cache_dir) / f'cg_transform_{key}_{precision}.npy'
 
 
 @cache
@@ -679,6 +755,7 @@ def _cached_full_cg_transform(
     irreps_in_str: str,
     irreps_out_str: str,
     correlation: int,
+    precision: str,
 ) -> np.ndarray:
     """Compute the native → canonical transform for full CG weights.
 
@@ -686,6 +763,24 @@ def _cached_full_cg_transform(
     linear-algebra work is only performed the first time a specific combination
     of irreps and correlation order is requested.
     """
+    if precision not in {'x32', 'x64'}:
+        raise ValueError(f'Unsupported CG-transform precision tag {precision!r}')
+
+    # fp32 inference may safely consume an fp64 transform, but the reverse is
+    # not true.  Keeping precision in the filename prevents an fp32 conversion
+    # from silently poisoning a later fp64 parity run.
+    load_precisions = ('x64', 'x32') if precision == 'x32' else ('x64',)
+    for load_precision in load_precisions:
+        candidate = _transform_disk_cache_path(
+            irreps_in_str, irreps_out_str, correlation, load_precision
+        )
+        if candidate is not None and candidate.exists():
+            return np.load(candidate)
+
+    disk_path = _transform_disk_cache_path(
+        irreps_in_str, irreps_out_str, correlation, precision
+    )
+
     try:
         from e3nn import o3  # noqa: PLC0415
     except ModuleNotFoundError as exc:  # pragma: no cover - import guard
@@ -707,6 +802,11 @@ def _cached_full_cg_transform(
     irreps_in_o3 = o3.Irreps(irreps_in_str)
     irreps_out_o3 = o3.Irreps(irreps_out_str)
 
+    # fp64 throughout: this transform multiplies imported checkpoint weights, so
+    # computing the design matrices at fp32 (as upstream did with .float()) caps
+    # whole-model parity at ~1e-7. See PROGRESS.md Stage 1.
+    import torch as _torch  # noqa: PLC0415
+
     torch_module = (
         TorchSymmetricContraction(
             irreps_in=irreps_in_o3,
@@ -715,7 +815,7 @@ def _cached_full_cg_transform(
             num_elements=1,
             use_reduced_cg=False,
         )
-        .float()
+        .to(_torch.float64)
         .eval()
     )
 
@@ -745,7 +845,7 @@ def _cached_full_cg_transform(
 
     batch = max(canonical_dim, native_dim)
     rng = np.random.default_rng(0)
-    inputs_np = rng.standard_normal((batch, mul, feature_dim)).astype(np.float32)
+    inputs_np = rng.standard_normal((batch, mul, feature_dim)).astype(np.float64)
 
     inputs_jax = jnp.asarray(inputs_np)
     indices_jax = jnp.zeros((batch,), dtype=jnp.int32)
@@ -764,7 +864,11 @@ def _cached_full_cg_transform(
     )
 
     transform = np.linalg.lstsq(canonical_matrix, native_matrix, rcond=1e-12)[0]
-    return transform.astype(np.float64)
+    transform = transform.astype(np.float64)
+    if disk_path is not None:
+        disk_path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(disk_path, transform)
+    return transform
 
 
 def _with_zero_weights(params: dict) -> dict:
@@ -798,7 +902,7 @@ def _canonical_design_matrix(
 
     outputs: list[np.ndarray] = []
     for idx in range(canonical_dim):
-        weight = np.zeros(weight_shape, dtype=np.float32)
+        weight = np.zeros(weight_shape, dtype=np.float64)
         weight[0, idx, 0] = 1.0
 
         params_idx = dict(params_zero)
@@ -832,13 +936,14 @@ def _native_design_matrix(
     """
     import torch  # noqa: PLC0415
 
-    torch_inputs = torch.tensor(inputs_np, dtype=torch.float32)
+    module_dtype = torch_module.contractions[0].weights_max.dtype
+    torch_inputs = torch.tensor(inputs_np, dtype=module_dtype)
     num_elements = torch_module.contractions[0].weights_max.shape[0]
-    torch_attrs = torch.ones((inputs_np.shape[0], num_elements), dtype=torch.float32)
+    torch_attrs = torch.ones((inputs_np.shape[0], num_elements), dtype=module_dtype)
 
     outputs: list[np.ndarray] = []
     for idx in range(basis_dim):
-        basis = np.zeros(basis_dim, dtype=np.float32)
+        basis = np.zeros(basis_dim, dtype=np.float64)
         basis[idx] = 1.0
         _assign_native_basis(torch_module, basis_vector=basis, correlation=correlation)
         with torch.no_grad():

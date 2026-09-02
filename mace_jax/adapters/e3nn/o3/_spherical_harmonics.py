@@ -84,7 +84,19 @@ class SphericalHarmonics(nnx.Module):
     def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
         """Compute spherical harmonics for input vectors x [*, 3]."""
         if self.normalize:
-            x = x / (jnp.linalg.norm(x, axis=-1, keepdims=True) + 1e-9)
+            # Match torch.nn.functional.normalize(x, dim=-1): x / max(||x||, eps)
+            # with eps=1e-12 (clamp, NOT additive — an additive epsilon shifts every
+            # unit vector by ~eps/r and breaks fp64 parity with e3nn torch).
+            # Exactly-zero rows (e.g. a single-atom FMM leaf, where the
+            # atom sits on its own centroid) make sqrt'(0)=inf poison the
+            # whole backward pass with NaN, even though the forward value is
+            # the clamped 0/1e-12 = 0. The double-where keeps the forward
+            # value bit-identical on every nonzero row and returns the zero
+            # row unchanged (same value, finite zero gradient).
+            sq = jnp.sum(jnp.square(x), axis=-1, keepdims=True)
+            nonzero = sq > 0
+            norm = jnp.sqrt(jnp.where(nonzero, sq, 1.0))
+            x = jnp.where(nonzero, x / jnp.maximum(norm, 1e-12), x)
 
         sh = spherical_harmonics(
             self._irreps_out, x, normalize=False, normalization='component'

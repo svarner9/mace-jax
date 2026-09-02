@@ -220,9 +220,18 @@ def nxx_register_module(torch_type: str):
 
 def init_from_torch(module: nnx.Module, torch_module):
     """Populate an NNX module's parameters from a Torch module in-place."""
+    # Native MACE full- and reduced-CG symmetric-contraction bases can have the
+    # same shape while using different coordinates.  The target module carries
+    # the otherwise-lost configuration needed by its registered import mapper.
+    from mace_jax.adapters.cuequivariance.symmetric_contraction import (
+        native_symmetric_contraction_import_mode,
+    )
+
     graphdef, state = nnx.split(module)
     pure = state_to_pure_dict(state)
-    updated = module.__class__.import_from_torch(torch_module, pure)
+    use_reduced_cg = getattr(module, 'use_reduced_cg', None)
+    with native_symmetric_contraction_import_mode(use_reduced_cg):
+        updated = module.__class__.import_from_torch(torch_module, pure)
     if updated is not None:
         nnx.replace_by_pure_dict(state, updated)
         module = nnx.merge(graphdef, state)

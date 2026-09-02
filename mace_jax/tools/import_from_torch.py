@@ -41,6 +41,10 @@ def _extract_norm_consts() -> dict[str, float]:
 
 
 def import_from_torch(jax_model, torch_model, variables):
+    from mace_jax.adapters.cuequivariance.symmetric_contraction import (
+        native_symmetric_contraction_import_mode,
+    )
+
     torch_use_reduced_cg = getattr(torch_model, 'use_reduced_cg', None)
     jax_use_reduced_cg = getattr(jax_model, 'use_reduced_cg', None)
     if (
@@ -86,7 +90,8 @@ def import_from_torch(jax_model, torch_model, variables):
             ),
             variables_pure,
         )
-    variables_pure = jax_model.import_from_torch(torch_model, variables_pure)
+    with native_symmetric_contraction_import_mode(jax_use_reduced_cg):
+        variables_pure = jax_model.import_from_torch(torch_model, variables_pure)
 
     # Persist normalize2mom constants in non-trainable collections.
     norm_consts = _extract_norm_consts()
