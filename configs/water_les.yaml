@@ -1,0 +1,35 @@
+# MACE-LES on bulk water: the group's revPBE-D3 water_les_d3 settings (docs/maceles.md).
+#   mace_jax_run_train --config configs/water_les.yaml --train_file train.xyz --valid_file val.xyz
+name: water_les
+results_dir: results/water_les
+E0s: average
+batch_size: 6
+
+model: MACELES
+r_max: 4.0
+num_interactions: 2
+max_ell: 2
+correlation: 3
+hidden_irreps: "128x0e + 128x1o"
+num_radial_basis: 8
+num_cutoff_basis: 5
+
+loss: weighted
+energy_weight: 10.0
+forces_weight: 100.0
+lr: 0.01
+clip_grad: 10.0
+ema: true
+ema_decay: 0.99
+
+max_num_epochs: 400
+eval_interval: 2
+swa: true
+start_swa: 200
+swa_lr: 1.0e-3
+swa_energy_weight: 1000.0
+swa_forces_weight: 1000.0
+
+checkpoint_every: 10
+default_dtype: float32
+seed: 42

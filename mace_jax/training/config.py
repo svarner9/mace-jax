@@ -586,3 +586,28 @@ __all__ = [
 # JSON is handy for logging the config inside the run directory.
 def config_to_json(config: TrainingConfig) -> str:
     return json.dumps(config.to_dict(), indent=1, sort_keys=False)
+
+
+def options_table() -> str:
+    """The option reference as a Markdown table, one section per group (used by docs/)."""
+    lines = []
+    groups: dict[str, list] = {}
+    for f in fields(TrainingConfig):
+        if not f.metadata.get('cli', True):
+            continue
+        groups.setdefault(f.metadata['group'], []).append(f)
+    for group, group_fields in groups.items():
+        lines += ['', f'### {group}', '', '| option | default | meaning |', '|---|---|---|']
+        for f in group_fields:
+            default = f.default if f.default is not dataclasses.MISSING else f.default_factory()
+            shown = 'None' if default is None else (repr(default) if isinstance(default, str) else str(default))
+            text = f.metadata['help'].replace('%%', '%')
+            if f.metadata.get('choices'):
+                text += ' Choices: ' + ', '.join(f'`{c}`' for c in f.metadata['choices']) + '.'
+            text = text.replace('|', '\\|')
+            lines.append(f'| `{f.name}` | `{shown}` | {text} |')
+    return '\n'.join(lines) + '\n'
+
+
+if __name__ == '__main__':  # python -m mace_jax.training.config
+    print(options_table())

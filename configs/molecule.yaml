@@ -1,0 +1,54 @@
+# A molecular (non-periodic) dataset with a few thousand frames. Options are the torch mace_run_train
+# names; see docs/configuration.md for every option and its default.
+#   mace_jax_run_train --config configs/molecule.yaml --train_file train.xyz --valid_file valid.xyz
+name: molecule
+results_dir: results/molecule
+
+# data (train_file / valid_file usually come from the command line)
+E0s: average
+energy_key: energy
+forces_key: forces
+batch_size: 16
+
+# model
+model: ScaleShiftMACE
+r_max: 5.0
+num_interactions: 2
+max_ell: 3
+correlation: 3
+hidden_irreps: "128x0e + 128x1o"
+MLP_irreps: 16x0e
+num_radial_basis: 8
+num_cutoff_basis: 5
+scaling: rms_forces_scaling
+
+# loss and optimizer
+loss: weighted
+energy_weight: 1.0
+forces_weight: 100.0
+optimizer: adam
+amsgrad: true
+lr: 0.01
+weight_decay: 5.0e-7
+clip_grad: 10.0
+scheduler: ReduceLROnPlateau
+lr_factor: 0.8
+scheduler_patience: 50
+ema: true
+ema_decay: 0.99
+
+# length and stage two
+max_num_epochs: 400
+patience: 200
+eval_interval: 1
+swa: true
+start_swa: 300
+swa_lr: 1.0e-3
+swa_energy_weight: 1000.0
+swa_forces_weight: 100.0
+
+# checkpoints and precision
+checkpoint_every: 10
+keep_checkpoints: 2
+default_dtype: float32
+seed: 1
