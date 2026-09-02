@@ -56,8 +56,10 @@ to rebuild the module, plus provenance. The entries that have bitten people:
   and per-atom shift inside the model, from `statistics.json` (`std`, `mean`).
 - **`output_mean` / `output_std`** (`MACE`) — the same affine transform applied *outside* the module;
   `1.0`/`0.0` for the other classes.
-- **`atomic_numbers`, `atomic_energies`** — element table and E0s (eV); `avg_num_neighbors` — the
-  message normalization constant from the training set.
+- **`atomic_numbers`, `atomic_energies`** — element table and E0s (eV), in the same order;
+  `avg_num_neighbors` — the message normalization constant from the training set. Check them with
+  `mace_jax_export --describe`: a model whose energies sit at a constant per-element offset from the
+  reference (MAE ≈ RMSE that training does not reduce) has wrong E0s baked in.
 - **`les`** (`MACELES`) — `sigma`, `dl`, `remove_self_interaction`, `norm_factor` of the Ewald sum.
 - **`model_class`** (`MACE`, `ScaleShiftMACE`, `LESMACE`) and `torch_model_class` (the name torch
   uses; `LESMACE` maps to `ScaleShiftMACE` for the backbone).

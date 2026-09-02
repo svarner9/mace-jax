@@ -56,6 +56,10 @@ in the port and is vendored in mlmd (`third_party/les-jax`); it is now a package
   (`MACE` | `ScaleShiftMACE` | `MACELES`) with the scale/shift inside the module for the latter two;
   the exported model config records `model_class`, scale/shift, LES parameters and
   `normalize2mom_consts`.
+- `tools/gin_model.py`: E0s are mapped by atomic number (`_atomic_energies_by_species`). Upstream
+  indexes the Z-keyed E0 dict with species indices, so for Z = [1, 6, 8] carbon and oxygen silently
+  got E0 = 0 and every trained model kept a per-element energy offset; a missing element is now an
+  error.
 - `tools/model_builder.py`: rebuilds `ScaleShiftMACE` and `LESMACE` from a config.
 - `tools/gin_functions.py`: `flags(matmul_precision='highest')` (TF32 off); MAE error tables
   require energy and forces.
