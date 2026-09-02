@@ -873,7 +873,7 @@ def _apply_swa_options(args: argparse.Namespace) -> None:
             args.swa_min_snapshots if args.swa_min_snapshots is not None else 1
         ),
         max_snapshots=args.swa_max_snapshots,
-        prefer_swa_params=args.swa_prefer if args.swa_prefer is not None else True,
+        prefer_swa_params=bool(args.swa_prefer) if args.swa_prefer is not None else False,
         stage_loss_factory=_resolve_swa_loss_factory(args, stage_loss_kwargs),
         stage_loss_kwargs=stage_loss_kwargs,
     )

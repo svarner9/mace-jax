@@ -5,11 +5,12 @@ to MACE without charge labels: a second readout stack predicts one latent charge
 the same node features, and a parameter-free Ewald sum of those charges is added to the energy,
 
 ```
-E = Σ_i E0(Z_i) + scale · Σ_i ε_i + shift · N + E_LES(q, r, cell)
+E = Σ_i E0(Z_i) + scale · Σ_i ε_i + E_LES(q, r, cell)
 ```
 
-`E_LES` is added *after* the scale/shift block and is not scaled (this is torch `MACELES`'s
-convention, and it matters for parity). In JAX the model is `les_jax.model.LESMACE`, a
+`E_LES` is added *after* the scale/shift block and is not scaled, and the per-atom shift is fixed at
+0 (`atomic_inter_shift = 0`), both as in torch `MACELES`; the scale is the RMS force of the training
+set. The readouts absorb the mean interaction energy. In JAX the model is `les_jax.model.LESMACE`, a
 `ScaleShiftMACE` subclass; the Ewald sum is `les_jax.ewald`, which reproduces torch `les` term by term
 (`sigma = 1.0` Å, `dl = 2.0` Å, self-interaction removed, `norm_factor = 90.4756` eV·Å/e²).
 

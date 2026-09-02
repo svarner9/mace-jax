@@ -91,10 +91,11 @@ def test_weighted_energy_and_forces_losses():
         atol=1e-6,
     )
 
+    # per-graph sums scaled by n_graphs/n_atoms = 2/3 (atom-weighted reduction, see loss.py)
     forces_loss = loss_mod.mean_squared_error_forces(graph, preds['forces'])
     np.testing.assert_allclose(
         np.asarray(forces_loss),
-        np.array([0.03666667, 0.42666668, 0.0], dtype=np.float32),
+        np.array([0.04888889, 0.28444445, 0.0], dtype=np.float32),
         rtol=1e-6,
         atol=1e-6,
     )
@@ -103,7 +104,7 @@ def test_weighted_energy_and_forces_losses():
     combined = loss_fn(graph, preds)
     np.testing.assert_allclose(
         np.asarray(combined),
-        np.array([0.14333335, 1.6533334, 0.0], dtype=np.float32),
+        np.array([0.14944445, 1.5822223, 0.0], dtype=np.float32),
         rtol=1e-6,
         atol=1e-6,
     )
@@ -127,7 +128,7 @@ def test_weighted_energy_forces_stress_loss():
     combined = loss_fn(graph, preds)
     np.testing.assert_allclose(
         np.asarray(combined),
-        np.array([0.14666666, 1.6800001, 0.0], dtype=np.float32),
+        np.array([0.15277778, 1.608889, 0.0], dtype=np.float32),
         rtol=1e-6,
         atol=1e-6,
     )
@@ -143,7 +144,7 @@ def test_weighted_energy_forces_l1_l2_loss():
     combined = loss_fn(graph, preds)
     np.testing.assert_allclose(
         np.asarray(combined),
-        np.array([0.4544895, 2.2, 0.0], dtype=np.float32),
+        np.array([0.48098624, 2.0666668, 0.0], dtype=np.float32),
         rtol=1e-6,
         atol=1e-6,
     )
@@ -176,8 +177,12 @@ def test_conditional_losses_match_baseline_for_small_forces():
         per_graph_weight, graph.n_node, total_repeat_length=per_node_loss.shape[0]
     )
     per_node_loss *= per_node_weight
+    # Force terms are reduced per atom over the whole batch (torch convention): each graph's sum
+    # is scaled by n_real_graphs / n_real_atoms so the trainer's mean over graphs equals the mean
+    # over atoms. The fixture has 2 real graphs with 3 atoms in total.
+    graph_mask = jraph.get_graph_padding_mask(graph).astype(jnp.float32)
     expected_huber = sum_nodes_of_the_same_graph(graph, per_node_loss)
-    expected_huber = expected_huber / jnp.maximum(graph.n_node.astype(jnp.float32), 1.0)
+    expected_huber = expected_huber * (2.0 / 3.0) * graph_mask
 
     np.testing.assert_allclose(
         np.asarray(conditional_mse), np.asarray(mse), rtol=1e-6, atol=1e-6

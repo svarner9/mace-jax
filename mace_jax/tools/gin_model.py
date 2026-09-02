@@ -1016,9 +1016,16 @@ def model(
         mace_module = modules.MACE(rngs=rngs, **kwargs)
     else:
         # Scale/shift inside the module: the external transform becomes the identity.
+        shift = mean
+        if model_type == 'MACELES':
+            # torch MACELES is built with atomic_inter_shift = 0 (the LES energy and the readout
+            # take up the mean); every trained torch MACE-LES model has shift 0. Match it so the
+            # exported bundle is interchangeable with torch-converted ones.
+            shift = 0.0
+            logging.info('MACELES: atomic_inter_shift fixed at 0 (torch convention), scale=%s', std)
         scale_shift_kwargs = dict(
             atomic_inter_scale=np.asarray(std, dtype=float),
-            atomic_inter_shift=np.asarray(mean, dtype=float),
+            atomic_inter_shift=np.asarray(shift, dtype=float),
         )
         mean, std = 0.0, 1.0
         if model_type == 'ScaleShiftMACE':

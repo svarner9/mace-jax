@@ -112,6 +112,23 @@ def weighted_mean_absolute_error_energy(
     return loss * mask
 
 
+
+def _atom_weighted_per_graph(graph: jraph.GraphsTuple, per_node_loss: jnp.ndarray) -> jnp.ndarray:
+    """Per-graph values whose mean over the real graphs of a batch is the mean over all real atoms.
+
+    torch MACE reduces per-atom force terms with one mean over every atom in the batch, so a large
+    structure weighs more than a small one. Averaging per-graph means instead (the previous
+    behaviour here) weights every structure equally and changes the optimum for datasets with
+    mixed structure sizes. Scaling each graph's sum by n_graphs / n_atoms makes the trainer's
+    graph average reproduce torch's atom average exactly; for uniform sizes the two coincide.
+    """
+    graph_mask = _graph_mask(graph)
+    per_graph_sum = sum_nodes_of_the_same_graph(graph, per_node_loss)
+    n_graphs = jnp.maximum(jnp.sum(graph_mask), 1.0)
+    n_atoms = jnp.maximum(jnp.sum(jnp.asarray(_num_atoms(graph)) * graph_mask), 1.0)
+    return per_graph_sum * (n_graphs / n_atoms) * graph_mask
+
+
 def mean_squared_error_forces(
     graph: jraph.GraphsTuple, forces_pred: jnp.ndarray
 ) -> jnp.ndarray:
@@ -127,10 +144,7 @@ def mean_squared_error_forces(
     per_graph_weight = _graph_attribute(graph, 'weight', 1.0, dtype=diff_sq.dtype)
     per_node_weight = _broadcast_to_nodes(graph, per_graph_weight)
     per_node_loss = per_node_weight * diff_sq
-    per_graph = _safe_divide(
-        sum_nodes_of_the_same_graph(graph, per_node_loss), _num_atoms(graph)
-    )
-    return per_graph * _graph_mask(graph)
+    return _atom_weighted_per_graph(graph, per_node_loss)
 
 
 def mean_normed_error_forces(
@@ -148,10 +162,7 @@ def mean_normed_error_forces(
     per_graph_weight = _graph_attribute(graph, 'weight', 1.0, dtype=diff_norm.dtype)
     per_node_weight = _broadcast_to_nodes(graph, per_graph_weight)
     per_node_loss = per_node_weight * diff_norm
-    per_graph = _safe_divide(
-        sum_nodes_of_the_same_graph(graph, per_node_loss), _num_atoms(graph)
-    )
-    return per_graph * _graph_mask(graph)
+    return _atom_weighted_per_graph(graph, per_node_loss)
 
 
 def weighted_mean_squared_stress(
@@ -267,10 +278,7 @@ def conditional_mse_forces(
     per_node_weight = _broadcast_to_nodes(graph, per_graph_weight * forces_weight)
 
     per_node_loss = per_node_weight * factor_per_node * diff_sq
-    per_graph = _safe_divide(
-        sum_nodes_of_the_same_graph(graph, per_node_loss), _num_atoms(graph)
-    )
-    return per_graph * _graph_mask(graph)
+    return _atom_weighted_per_graph(graph, per_node_loss)
 
 
 def conditional_huber_forces(
@@ -315,10 +323,7 @@ def conditional_huber_forces(
     )
     per_node_weight = _broadcast_to_nodes(graph, per_graph_weight * forces_weight)
     per_node_loss = per_node_weight * per_component_loss
-    per_graph = _safe_divide(
-        sum_nodes_of_the_same_graph(graph, per_node_loss), _num_atoms(graph)
-    )
-    return per_graph * _graph_mask(graph)
+    return _atom_weighted_per_graph(graph, per_node_loss)
 
 
 @gin.register

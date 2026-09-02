@@ -208,3 +208,22 @@ F 40.47 meV/Å. For scale: the full 400-epoch `water_les_d3` training on 15 344 
   dict (species indices ascend with atomic number) and records it, instead of writing
   `atomic_numbers = (0, 1, ...)`; the trainer also binds it from the loader. The upstream gin tests
   exercise this path.
+
+## 2026-09-02 — consistency review against `train_paper.py` / torch 0.3.15 (owner's reviewer)
+
+`handoffs/NEW_TRAINER_CONSISTENCY_REVIEW.md` (in `mace-jax-port-learn-the-lr`) listed five training
+semantics differences. Each was re-verified against the torch 0.3.15 source and judged on merit
+(accuracy / efficiency / bug likelihood), not on parity for its own sake:
+
+| item | finding | decision |
+|---|---|---|
+| force loss reduction | ours (upstream mace-jax) averaged per-graph means → a 51-atom frame's atoms weighed 65/51× a 65-atom frame's; torch averages over all atoms | **adopted torch**: `_atom_weighted_per_graph` in `modules/loss.py` for the four force terms; identical for uniform sizes; matches how RMSE_F is reported. Upstream loss tests updated (they encoded the graph-weighted values) |
+| stage two | ours evaluated/exported a running average of the raw parameters (`prefer_swa_params=True`); torch evaluates and saves the EMA parameters and never uses its `AveragedModel` | **default = EMA** (published recipe, comparable with every torch / `train_paper` number); averaging stays available as `swa_average_params` — no evidence it is better or worse |
+| MACELES `atomic_inter_shift` | ours used the statistics mean; torch and every trained torch MACE-LES use 0 | **0 for MACELES**: with fitted E0s the mean is ~0 anyway (1e-13 on water), so this is a no-op numerically and makes JAX-trained and torch-converted LES bundles interchangeable |
+| weight-decay parameter set | ours matched the substring `linear_down` (no such block) or `symmetric_contraction` → only the product contractions were decayed; torch decays interaction `linear`/`skip_tp_full` weights and all product parameters | **fixed to torch's set** (a bug in the old mask, tiny effect at 5e-7) |
+| TF32 | ours off (`highest`), torch/`train_paper` on | **kept ours** — 1.6e-2 eV/Å RMS force error measured with TF32; the reviewer agrees it is the more defensible default; A/B before mixing numbers with `train_paper` runs |
+| batching | edge-budget packing vs torch's fixed structure count | kept — fixed shapes are what makes JAX compile once; documented in `migration_from_torch.md` |
+| silent non-finite gradient zeroing | both trainers zero NaN/Inf gradient entries silently (hid an fp32 overflow for weeks in the FMM work) | **count logged**: `update_fn` returns the number of zeroed entries and the loop warns per batch with the count and loss |
+
+Not changed: E0s (consistent after the fix above), model classes and LES constants (identical),
+optimizer / scheduler / EMA / clipping (same code), early stopping (ours has it, `train_paper` not).

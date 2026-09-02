@@ -38,6 +38,7 @@ learning rate; `error_table`; W&B; the output units.
 | `--restart_latest` | resumes | resumes from the newest periodic checkpoint in `results/checkpoints/` (`--checkpoint_every` controls how often one is written) |
 | `--model MACE` | scale/shift inside the model | applies the energy scale/shift *outside* the module (mace-jax's historical behaviour) and records it in the bundle; prefer `ScaleShiftMACE`, which is torch's form and the default |
 | `--scheduler` | `ReduceLROnPlateau`, `ExponentialLR` | the same names (mapped to the JAX schedules); `constant` too |
+| loss reductions, stage two, weight decay set | per-atom energy MSE over structures, force MSE over all atoms; stage two evaluates the EMA parameters; decay on interaction `linear`/`skip_tp_full` and product weights | the same (checked against torch 0.3.15 in `BUILD_LOG.md`); `--swa_average_params` is an extra that torch does not have |
 | `--stress_weight` for MACELES | supported (torch stress is missing the Ewald cell term) | train on energies and forces; mlmd computes stress correctly in MD |
 | multi-GPU | `--distributed` | `--launcher local` (one node), `--distributed` (multi-node) |
 | fine-tuning a foundation model | `--foundation_model` | not through this CLI; the gin workflow's `--torch-checkpoint` (see `upstream_README.md`) imports a torch model as the starting point |

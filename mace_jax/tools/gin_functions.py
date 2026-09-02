@@ -803,15 +803,24 @@ def optimizer(
     """
 
     def weight_decay_mask(params):
-        """Build a tree mask selecting parameters to regularize."""
+        """Parameters that receive weight decay: the torch MACE set.
+
+        torch decays the interaction blocks' ``linear.weight`` and ``skip_tp_full.weight`` and every
+        parameter of the product blocks; embeddings, ``linear_up``, ``conv_tp_weights``, the residual
+        ``skip_tp`` and the readouts are not decayed. (The earlier mask matched ``linear_down``,
+        which no block has, so only the symmetric contractions were decayed.)
+        """
         params = tools.flatten_dict(params)
-        mask = {
-            k: any(
-                ('linear_down' in str(ki)) or ('symmetric_contraction' in str(ki))
-                for ki in k
-            )
-            for k in params
-        }
+
+        def _decay(path) -> bool:
+            keys = [str(k) for k in path]
+            if 'products' in keys:
+                return True
+            if 'interactions' in keys:
+                return ('linear' in keys or 'skip_tp_full' in keys) and 'weight' in keys
+            return False
+
+        mask = {k: _decay(k) for k in params}
         if not any(mask.values()):
             mask = {k: getattr(v, 'ndim', 0) > 1 for k, v in params.items()}
         return tools.unflatten_dict(mask)

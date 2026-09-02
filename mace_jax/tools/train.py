@@ -878,13 +878,20 @@ def train(
         ema_params,
         num_updates: int,
         graph: jraph.GraphsTuple,
-    ) -> tuple[float, Any, Any, Any, jnp.ndarray, dict | None, tuple]:
+    ) -> tuple[float, Any, Any, Any, jnp.ndarray, dict | None, tuple, jnp.ndarray]:
         """Apply one optimizer step and update EMA parameters."""
         n, loss, grad, batch_metrics, head_metrics = grad_fn(params, graph)
         loss = loss / n
         grad = jax.tree_util.tree_map(lambda x: x / n, grad)
         if lr_scale_by_graphs:
             grad = jax.tree_util.tree_map(lambda g: g * n, grad)
+        # Count what the sanitizer is about to zero; silently zeroed gradients hid an fp32
+        # overflow for weeks in a related project, so the count is reported per batch.
+        n_nonfinite = sum(
+            jnp.sum(~jnp.isfinite(g))
+            for g in jax.tree_util.tree_leaves(grad)
+            if jnp.issubdtype(jnp.asarray(g).dtype, jnp.inexact)
+        )
         grad = _sanitize_grads(grad)
 
         if max_grad_norm is not None:
@@ -913,6 +920,7 @@ def train(
             n,
             batch_metrics,
             head_metrics,
+            n_nonfinite,
         )
 
     process_index = getattr(jax, 'process_index', lambda: 0)()
@@ -1099,9 +1107,20 @@ def train(
                 n_graphs,
                 batch_metrics,
                 head_metrics,
+                n_nonfinite,
             ) = update_fn(params, optimizer_state, ema_params, num_updates_value, graph)
             loss = float(loss)
             n_graphs_value = float(n_graphs)
+            n_nonfinite = int(n_nonfinite)
+            if is_primary and n_nonfinite:
+                logging.warning(
+                    'Update %s: %d non-finite gradient entries were zeroed before the optimizer '
+                    'step (loss=%.4g). Frequent occurrences mean the run is numerically unstable; '
+                    'lower the learning rate or use float64.',
+                    num_updates,
+                    n_nonfinite,
+                    loss,
+                )
             if is_primary and n_graphs_value == 0.0:
                 logging.warning(
                     'Batch %s contains no valid graphs; gradients are zero.',

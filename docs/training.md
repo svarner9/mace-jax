@@ -72,7 +72,9 @@ The full receptive field is `num_interactions × r_max`; size the training struc
 ```
 
 Losses: `weighted` (per-atom energy + forces + stress MSE, the torch default), `ef`, `forces_only`,
-`huber`, `universal` (Huber with the MACE-MP weighting), `virials`, `dipole`, `l1l2`. Only the weights a
+`huber`, `universal` (Huber with the MACE-MP weighting), `virials`, `dipole`, `l1l2`. Reductions follow
+torch: the energy term is a mean over structures of the per-atom error squared, the force term a
+mean over every atom in the batch (so large structures weigh more, as in torch). Only the weights a
 loss uses are passed on (a stress weight on `ef` is ignored, not an error). The reported errors follow
 `--error_table` (default `PerAtomRMSE`): energies in meV/atom, forces in meV/Å, in physical units
 whatever the model's internal scaling.
@@ -87,8 +89,10 @@ average of the parameters (`--ema`) is what gets evaluated and saved when enable
 ```
 
 From epoch `start_swa` (default 75 % of `max_num_epochs`) the loss weights switch to the `swa_*`
-values, the learning rate to `swa_lr`, and the evaluated parameters become the running average of
-the checkpoints since the switch — torch MACE's stage two. Set `start_swa` for the run you are doing;
+values and the learning rate to `swa_lr`; evaluation and the saved model keep using the EMA
+parameters — exactly torch MACE's stage two (torch updates an `AveragedModel` but never evaluates
+or saves it). `--swa_average_params` additionally evaluates and exports the running average of the
+parameters collected since the switch; that is a different model from torch's and is off by default. Set `start_swa` for the run you are doing;
 copying it from a run with a different `max_num_epochs` puts the switch in the wrong place.
 
 ## 5. Outputs, checkpoints, resume

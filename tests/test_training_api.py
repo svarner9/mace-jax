@@ -360,6 +360,7 @@ def test_maceles_trains_on_periodic_data_and_exports_directory_bundle(periodic_x
     assert meta['model_class'] == 'LESMACE'
     assert meta['les'] == {'sigma': 1.0, 'dl': 2.0, 'remove_self_interaction': True, 'norm_factor': 90.4756}
     assert 'atomic_inter_scale' in meta
+    assert float(np.asarray(meta['atomic_inter_shift']).reshape(-1)[0]) == 0.0  # torch MACELES convention
     # loads through the mlmd MACELES path (config.json + Param-only msgpack) and evaluates
     calc = ase_calculator(result.bundle, dtype='float64')
     atoms = ase.io.read(periodic_xyz / 'valid.xyz', index=0)

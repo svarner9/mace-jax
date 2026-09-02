@@ -201,6 +201,7 @@ class TrainingConfig:
     swa_stress_weight: float = _f(10.0, 'Stress weight in stage two.', group='swa')
     swa_virials_weight: float = _f(10.0, 'Virials weight in stage two.', group='swa')
     swa_dipole_weight: float = _f(1.0, 'Dipole weight in stage two.', group='swa')
+    swa_average_params: bool = _f(False, 'Stage two: also evaluate and export the running average of the parameters collected since start_swa (mace-jax extension). torch evaluates the EMA parameters in stage two and never the average, so leave this off for torch parity.', group='swa')
 
     # ---- checkpoints -----------------------------------------------------------------------
     checkpoint_every: int = _f(10, 'Write a resumable checkpoint every N epochs (0 disables; the best model is always saved).', group='checkpoints')
@@ -386,6 +387,7 @@ class TrainingConfig:
                 add('--swa-virials-weight', self.swa_virials_weight)
             if 'dipole_weight' in accepted:
                 add('--swa-dipole-weight', self.swa_dipole_weight)
+            args.append('--swa-prefer' if self.swa_average_params else '--swa-no-prefer')
         add('--checkpoint-dir', str(self.checkpoint_dir))
         if self.checkpoint_every and self.checkpoint_every > 0:
             add('--checkpoint-every', self.checkpoint_every)
