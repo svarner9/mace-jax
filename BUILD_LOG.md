@@ -151,3 +151,8 @@ Also found in this pass: `export_bundle` for MACE-LES wrote the initial paramete
 `replace_by_pure_dict` fills the State, not the module it came from); `ase_calculator` did not
 attach the Ewald k-grid for MACE-LES. Both fixed; the LES test compares bundle vs checkpoint
 predictions and asserts the reciprocal-space term is active.
+
+Bundle/trainer consistency on the 6-epoch MACE-LES water model (before the E0 fix), 200
+validation frames through `mace_jax_eval_configs` (ASE calculator path, per-structure k-grid):
+E-RMSE 76.98 meV/atom, F-RMSE 68.57 meV/Å versus the trainer's own 76.78 / 68.44 — the exported
+bundle is the trained model. Both GPU runs resubmitted with the E0 fix (jobs 16792157, 16792158).
