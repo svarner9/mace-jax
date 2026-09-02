@@ -470,6 +470,14 @@ class GraphGlobals(NamedTuple):
     virials_weight: np.ndarray | None = None
     dipole_weight: np.ndarray | None = None
     polarizability_weight: np.ndarray | None = None
+    # Periodicity flags per graph, [n_graphs, 3] bool. Needed by models whose energy depends on
+    # whether a graph is periodic (MACE-LES routes periodic graphs to the reciprocal-space Ewald
+    # branch); the neighbor list already accounts for it via `shifts`.
+    pbc: np.ndarray | None = None
+    # MACE-LES integer k-grid per graph, [n_graphs, num_k, 3] int32, zero-padded to a fixed
+    # num_k so the compiled program has a static shape. Attached by
+    # `mace_jax.training.les.attach_kgrid`; None for every other model.
+    les_nvec: np.ndarray | None = None
 
 
 def graph_from_configuration(
@@ -508,6 +516,9 @@ def graph_from_configuration(
         head_index = head_to_index[config.head]
 
     head_array = np.asarray(head_index, dtype=np.int32)
+    pbc_array = np.asarray(
+        config.pbc if config.pbc is not None else (False, False, False), dtype=bool
+    ).reshape(3)
 
     return jraph.GraphsTuple(
         nodes=GraphNodes(
@@ -557,6 +568,7 @@ def graph_from_configuration(
                     if config.polarizability_weight is None
                     else np.asarray(config.polarizability_weight)
                 ),
+                pbc=pbc_array,
             ),
         ),
         receivers=receivers,

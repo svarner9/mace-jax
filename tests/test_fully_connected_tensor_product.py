@@ -4,7 +4,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
-from cuequivariance_torch.operations.tp_fully_connected import (
+
+pytest.importorskip('cuequivariance_torch')
+from cuequivariance_torch.operations.tp_fully_connected import (  # noqa: E402
     FullyConnectedTensorProduct as CueFullyConnectedTensorProductTorch,
 )
 from e3nn import o3

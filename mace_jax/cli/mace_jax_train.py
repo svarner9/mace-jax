@@ -1298,7 +1298,55 @@ def _shutdown_distributed(*, directory: str, tag: str) -> None:
         logging.debug('Failed to shutdown JAX distributed runtime', exc_info=True)
 
 
-def run_training() -> None:
+def _query_gin(parameter: str, default):
+    """The bound value of a gin parameter, or ``default`` when it is not bound."""
+    try:
+        return gin.query_parameter(parameter)
+    except ValueError:
+        return default
+
+
+def _maybe_wrap_les_loaders(train_loader, valid_loader, test_loader):
+    """For ``model.model_type = 'MACELES'`` attach the Ewald k-grid to every batch.
+
+    The grid size is fixed dataset-wide (one compiled program); see
+    `mace_jax.training.les`. Also binds the static real-space flag the model needs.
+    """
+    model_type = _query_gin('mace_jax.tools.gin_model.model.model_type', 'MACE')
+    if str(model_type) != 'MACELES':
+        return train_loader, valid_loader, test_loader
+    from mace_jax.training import les as les_batching  # noqa: PLC0415
+
+    dl = _query_gin('mace_jax.tools.gin_model.model.les_dl', None)
+    if dl is None:
+        from les_jax.ewald import DEFAULT_DL  # noqa: PLC0415
+
+        dl = DEFAULT_DL
+    paths: list[Path] = []
+    for name in ('train_path', 'valid_path', 'test_path'):
+        value = _query_gin(f'mace_jax.tools.gin_datasets.datasets.{name}', None)
+        if value in (None, 'None', ''):
+            continue
+        values = value if isinstance(value, (list, tuple)) else [value]
+        paths.extend(gin_datasets._expand_hdf5_inputs([str(v) for v in values]))
+    (train_loader, valid_loader, test_loader), info = les_batching.wrap_loaders(
+        (train_loader, valid_loader, test_loader), paths, dl=float(dl)
+    )
+    with gin.unlock_config():  # the config is finalized by now; this is a data-derived constant
+        gin.bind_parameter(
+            'mace_jax.tools.gin_model._graph_to_data.les_include_realspace',
+            bool(info.has_nonpbc),
+        )
+    return train_loader, valid_loader, test_loader
+
+
+def run_training() -> dict:
+    """Run one training job from the current gin configuration.
+
+    Returns a dict with ``directory``, ``tag``, ``checkpoint_dir``, ``model_config``,
+    ``eval_params`` (the parameters used for evaluation: EMA/SWA if enabled) and ``epoch``, so a
+    caller can export the trained model without re-reading a checkpoint.
+    """
     seed = gin_functions.flags()
     directory, tag, logger = gin_functions.logs()
     process_index = getattr(jax, 'process_index', lambda: 0)()
@@ -1316,6 +1364,15 @@ def run_training() -> None:
     logging.info('MACE-JAX version: %s', mace_jax.__version__)
 
     wandb_run = None
+    outcome: dict = {
+        'directory': directory,
+        'tag': tag,
+        'checkpoint_dir': _query_gin('mace_jax.tools.gin_functions.train.checkpoint_dir', None)
+        or str(Path(directory) / 'checkpoints'),
+        'model_config': None,
+        'eval_params': None,
+        'epoch': None,
+    }
     try:
         (
             train_loader,
@@ -1324,6 +1381,9 @@ def run_training() -> None:
             atomic_energies_dict,
             r_max,
         ) = gin_datasets.datasets()
+        train_loader, valid_loader, test_loader = _maybe_wrap_les_loaders(
+            train_loader, valid_loader, test_loader
+        )
 
         wandb_run = _start_wandb(
             is_primary=is_primary,
@@ -1340,6 +1400,7 @@ def run_training() -> None:
             initialize_seed=seed,
         )
         model_config = getattr(model_fn, 'model_config', None)
+        outcome['model_config'] = model_config
         logging.info('Number of interaction blocks: %s', num_message_passing)
 
         params = gin_functions.reload(params)
@@ -1349,7 +1410,7 @@ def run_training() -> None:
 
         if gin_functions.checks(predictor, params, train_loader):
             logging.info('Checks enabled; exiting after sanity verification.')
-            return
+            return outcome
 
         interval_length = _estimate_interval_length(train_loader)
         logging.info(
@@ -1369,7 +1430,7 @@ def run_training() -> None:
             num_params=num_params,
         )
 
-        gin_functions.train(
+        epoch, eval_params = gin_functions.train(
             predictor=predictor,
             params=params,
             optimizer_state=optimizer_state,
@@ -1385,9 +1446,12 @@ def run_training() -> None:
             wandb_run=wandb_run,
             model_config=model_config,
         )
+        outcome['epoch'] = epoch
+        outcome['eval_params'] = eval_params
     finally:
         gin_functions.finish_wandb(wandb_run)
         _shutdown_distributed(directory=directory, tag=tag)
+    return outcome
 
 
 def main(argv: Sequence[str] | None = None) -> None:

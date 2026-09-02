@@ -399,6 +399,7 @@ def flags(
     process_index: int | None = None,
     coordinator_address: str | None = None,
     coordinator_port: int | None = None,
+    matmul_precision: str | None = 'highest',
 ):
     """Configure JAX runtime, device selection, and RNG seeds.
 
@@ -413,12 +414,21 @@ def flags(
         process_index: Index of the current process.
         coordinator_address: Coordinator host for multi-process setup.
         coordinator_port: Coordinator port for multi-process setup.
+        matmul_precision: Value for ``jax_default_matmul_precision``. On NVIDIA GPUs JAX runs
+            float32 matrix products in TF32 (10-bit mantissa) by default; for MACE that is not
+            a harmless speed-up: float32 forces on 128 waters were off by 1.6e-2 eV/A RMS
+            (max 0.14) from float64, versus 9e-6 at full float32 precision. The default
+            ``'highest'`` disables TF32 process-wide (the setting is applied at compile time,
+            so it cannot be scoped to a block). ``None`` leaves JAX's default.
 
     Returns:
         The original seed value (for convenience in gin bindings).
     """
     jax_config.update('jax_debug_nans', debug)
     jax_config.update('jax_debug_infs', debug)
+    if matmul_precision is not None:
+        jax_config.update('jax_default_matmul_precision', matmul_precision)
+        logging.info('jax_default_matmul_precision = %s', matmul_precision)
     tools.set_default_dtype(dtype)
     device_utils.initialize_jax_runtime(
         device=device,

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import jax.numpy as jnp
+import jraph
 import numpy as np
 from ase.io import read
 from e3nn_jax import Irreps
@@ -32,6 +33,12 @@ def _make_configuration(distance: float) -> Configuration:
 def _graph_to_data(distance: float, cutoff: float = 6.0) -> dict[str, jnp.ndarray]:
     config = _make_configuration(distance)
     graph = graph_from_configuration(config, cutoff=cutoff)
+    # `_graph_to_data` derives `edge_mask` with jraph's padding convention (the last graph of a
+    # batch is padding), as every training / prediction / calculator path feeds padded batches.
+    # An unpadded single graph would therefore be masked out entirely; pad it like the callers do.
+    graph = jraph.pad_with_graphs(
+        graph, n_node=int(graph.n_node.sum()) + 1, n_edge=int(graph.n_edge.sum()) + 1, n_graph=2
+    )
     return gin_model._graph_to_data(graph, num_species=1)
 
 

@@ -307,8 +307,23 @@ def _build_jax_model(
     if config.get('apply_cutoff') is not None:
         common_kwargs['apply_cutoff'] = bool(config['apply_cutoff'])
 
-    torch_class = config.get('torch_model_class', 'MACE')
-    if torch_class == 'ScaleShiftMACE' or 'atomic_inter_scale' in config:
+    model_class = config.get('model_class') or config.get('torch_model_class', 'MACE')
+    if model_class == 'LESMACE' or 'les' in config:
+        # MACE-LES: ScaleShiftMACE plus latent charges and the Ewald energy (les_jax).
+        from les_jax.model import LESMACE  # noqa: PLC0415
+
+        les = dict(config.get('les') or {})
+        return LESMACE(
+            atomic_inter_scale=np.asarray(config.get('atomic_inter_scale', 1.0)),
+            atomic_inter_shift=np.asarray(config.get('atomic_inter_shift', 0.0)),
+            les_sigma=float(les.get('sigma', 1.0)),
+            les_dl=float(les.get('dl', 2.0)),
+            les_remove_self_interaction=bool(les.get('remove_self_interaction', True)),
+            les_norm_factor=float(les.get('norm_factor', 90.4756)),
+            rngs=rngs,
+            **common_kwargs,
+        )
+    if model_class == 'ScaleShiftMACE' or 'atomic_inter_scale' in config:
         return ScaleShiftMACE(
             atomic_inter_scale=np.asarray(config.get('atomic_inter_scale', 1.0)),
             atomic_inter_shift=np.asarray(config.get('atomic_inter_shift', 0.0)),

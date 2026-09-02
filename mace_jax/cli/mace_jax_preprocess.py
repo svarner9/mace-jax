@@ -117,7 +117,14 @@ def _compute_statistics(
     z_table: data.AtomicNumberTable,
     r_max: float,
     atomic_energies: np.ndarray,
+    scaling: str = 'rms_forces_scaling',
 ) -> tuple[float, float, float]:
+    """(avg_num_neighbors, mean, std) over ``configs`` for the requested ``scaling``.
+
+    ``mean`` is the mean interaction energy per atom (E - sum E0) / N. ``std`` is the RMS force
+    for ``rms_forces_scaling`` (torch MACE default), the standard deviation of the per-atom
+    interaction energy for ``std_scaling``, and 1 for ``no_scaling`` (mean is then 0 too).
+    """
     neighbor_sum = 0.0
     neighbor_count = 0
     energy_per_atom = []
@@ -148,13 +155,23 @@ def _compute_statistics(
         if config.forces is not None:
             forces.append(np.asarray(config.forces))
     avg_num_neighbors = neighbor_sum / neighbor_count if neighbor_count > 0 else 0.0
+    if scaling == 'no_scaling':
+        return avg_num_neighbors, 0.0, 1.0
     mean = float(np.mean(energy_per_atom)) if energy_per_atom else 0.0
-    if forces:
-        forces_array = np.concatenate(forces, axis=0)
-        rms = float(np.sqrt(np.mean(np.square(forces_array))))
+    if scaling == 'std_scaling':
+        std = float(np.std(energy_per_atom)) if energy_per_atom else 0.0
+    elif scaling == 'rms_forces_scaling':
+        if forces:
+            forces_array = np.concatenate(forces, axis=0)
+            std = float(np.sqrt(np.mean(np.square(forces_array))))
+        else:
+            std = 0.0
     else:
-        rms = 0.0
-    return avg_num_neighbors, mean, rms
+        raise ValueError(f'unknown scaling {scaling!r}')
+    if std == 0.0:
+        logging.warning('Standard deviation of the scaling is zero, changing to no scaling.')
+        std = 1.0
+    return avg_num_neighbors, mean, std
 
 
 def _collect_configs(
@@ -217,7 +234,18 @@ def main() -> None:
     run(args)
 
 
-def run(args: argparse.Namespace) -> None:
+def _split_summary(configs: data.Configurations) -> dict:
+    atoms = [int(len(c.atomic_numbers)) for c in configs]
+    return {
+        'n_structures': len(configs),
+        'n_atoms': int(sum(atoms)),
+        'mean_atoms': float(np.mean(atoms)) if atoms else 0.0,
+        'max_atoms': int(max(atoms)) if atoms else 0,
+    }
+
+
+def run(args: argparse.Namespace) -> dict:
+    """Preprocess per ``args``; returns a summary (structure counts, atoms, statistics path)."""
     tools.set_seeds(args.seed)
     random.seed(args.seed)
     logging.basicConfig(
@@ -308,6 +336,14 @@ def run(args: argparse.Namespace) -> None:
             label = name if name is not None else 'test'
             _write_hdf5_splits(subset, prefix / 'test', label, args.num_process)
 
+    summary: dict = {
+        'train': _split_summary(train_configs),
+        'valid': _split_summary(valid_configs),
+        'test': _split_summary([c for _, subset in test_configs_by_type for c in subset]),
+        'r_max': float(args.r_max),
+        'atomic_numbers': [int(z) for z in z_table.zs],
+    }
+
     if args.compute_statistics:
         atomic_energies_dict = _resolve_atomic_energies(
             atomic_energies_dict=atomic_energies_dict,
@@ -336,24 +372,28 @@ def run(args: argparse.Namespace) -> None:
         atomic_energies = np.array(
             [atomic_energies_dict[z] for z in z_table.zs], dtype=np.float64
         )
+        scaling = getattr(args, 'scaling', 'rms_forces_scaling') or 'rms_forces_scaling'
         avg_num_neighbors, mean, std = _compute_statistics(
-            train_configs, z_table, args.r_max, atomic_energies
+            train_configs, z_table, args.r_max, atomic_energies, scaling=scaling
         )
         logging.info('Average number of neighbors: %s', avg_num_neighbors)
         logging.info('Mean: %s', mean)
-        logging.info('Standard deviation: %s', std)
+        logging.info('Standard deviation (%s): %s', scaling, std)
 
         statistics = {
             'atomic_energies': str(atomic_energies_dict),
             'avg_num_neighbors': avg_num_neighbors,
             'mean': mean,
             'std': std,
+            'scaling': scaling,
             'atomic_numbers': str([int(z) for z in z_table.zs]),
             'r_max': args.r_max,
         }
         stats_path = prefix / 'statistics.json'
         with open(stats_path, 'w', encoding='utf-8') as handle:
             json.dump(statistics, handle)
+        summary['statistics'] = str(stats_path)
+    return summary
 
 
 if __name__ == '__main__':

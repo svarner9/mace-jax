@@ -150,12 +150,43 @@ def _export_model_config(mace_module: modules.MACE) -> dict:
     }
     normalize2mom_consts = getattr(mace_module, '_normalize2mom_consts', None)
     if normalize2mom_consts is not None:
+        # The e3nn activation-normalization constants this module was built with. A model
+        # trained in JAX carries the Monte-Carlo estimate (silu: 1.6742560863); a model
+        # imported from torch carries torch's value (1.6791767924). Either way the constant is
+        # part of the model definition and is restored verbatim on load.
         config['normalize2mom_consts'] = {
             str(k): float(v) for k, v in normalize2mom_consts.items()
         }
     if cueq_config is not None and getattr(cueq_config, 'conv_fusion', False):
         config['cue_conv_fusion'] = True
+
+    # Model class and its extra parameters. `torch_model_class` is what
+    # `model_builder._build_jax_model` dispatches on; `model_class` is the same information
+    # under the name the mlmd bundle format uses.
+    model_class = type(mace_module).__name__
+    config['model_class'] = model_class
+    config['torch_model_class'] = (
+        'ScaleShiftMACE' if model_class == 'LESMACE' else model_class
+    )
+    scale_shift = getattr(mace_module, 'scale_shift', None)
+    if scale_shift is not None:
+        config['atomic_inter_scale'] = _serialize_config_value(
+            np.asarray(jnp.asarray(scale_shift.scale), dtype=float)
+        )
+        config['atomic_inter_shift'] = _serialize_config_value(
+            np.asarray(jnp.asarray(scale_shift.shift), dtype=float)
+        )
+    if model_class == 'LESMACE':
+        config['les'] = {
+            'sigma': float(mace_module.les_sigma),
+            'dl': float(mace_module.les_dl),
+            'remove_self_interaction': bool(mace_module.les_remove_self_interaction),
+            'norm_factor': float(mace_module.les_norm_factor),
+        }
     return config
+
+
+MODEL_TYPES = ('MACE', 'ScaleShiftMACE', 'MACELES')
 
 
 @gin.configurable
@@ -249,12 +280,17 @@ def _graph_to_data(
     *,
     num_species: int,
     padded_edge_length: float | None = None,
+    les_include_realspace: bool | None = None,
 ) -> dict[str, jnp.ndarray]:
     """Convert a (possibly padded) graph into the MACE data dictionary.
 
     Args:
         graph: Input `jraph.GraphsTuple`, potentially padded.
         num_species: Size of the atomic-number vocabulary used for one-hot encoding.
+        padded_edge_length: Sentinel length given to padded edges (beyond the cutoff).
+        les_include_realspace: MACE-LES only; static flag telling the model whether the batch
+            can contain non-periodic structures (real-space Ewald branch). Bound by the trainer
+            from a scan of the dataset.
 
     Returns:
         Dict of arrays matching the MACE module inputs (positions, edges, shifts,
@@ -306,7 +342,18 @@ def _graph_to_data(
         'ptr': ptr,
         'cell': cell,
         'edge_mask': jraph.get_edge_padding_mask(graph).astype(bool),
+        'node_mask': node_mask,
     }
+    # Periodicity and the MACE-LES k-grid travel with the graph globals (see
+    # data.utils.GraphGlobals); LESMACE reads `pbc`, `les_nvec` and `node_mask`.
+    pbc = getattr(graph.globals, 'pbc', None)
+    if pbc is not None:
+        data_dict['pbc'] = jnp.asarray(pbc, dtype=bool).reshape(-1, 3)
+    les_nvec = getattr(graph.globals, 'les_nvec', None)
+    if les_nvec is not None:
+        data_dict['les_nvec'] = jnp.asarray(les_nvec, dtype=jnp.int32)
+    if les_include_realspace is not None:
+        data_dict['les_has_nonpbc'] = bool(les_include_realspace)  # static, not traced
     if padded_edge_length is not None:
         data_dict['padded_edge_length'] = jnp.asarray(
             padded_edge_length, dtype=positions.dtype
@@ -407,6 +454,11 @@ def model(
     torch_head: str | None = None,
     torch_param_dtype: str | None = None,
     cueq_config=None,
+    model_type: str = 'MACE',
+    les_sigma: float | None = None,
+    les_dl: float | None = None,
+    les_remove_self_interaction: bool = True,
+    les_norm_factor: float | None = None,
     **kwargs,
 ):
     """Construct a MACE model and return an apply function plus initial params.
@@ -437,6 +489,16 @@ def model(
         torch_head: Optional head name to select from Torch multi-head models.
         torch_param_dtype: Optional dtype override ('float32' or 'float64') for Torch params.
         cueq_config: Optional CuEquivarianceConfig to enable cueq acceleration paths.
+        model_type: ``'MACE'``, ``'ScaleShiftMACE'`` or ``'MACELES'`` (the torch ``--model``
+            names). For ``'MACE'`` the ``scaling`` (mean, std) is applied *outside* the module,
+            as in earlier versions of this code, and recorded as ``output_mean``/``output_std``
+            in the model config. For ``'ScaleShiftMACE'`` and ``'MACELES'`` the same affine
+            transform lives *inside* the module as a ``ScaleShiftBlock`` (``atomic_inter_scale
+            = std``, ``atomic_inter_shift = mean``), exactly like torch MACE, so a saved model
+            returns physical units on its own. The loss and gradients are identical.
+        les_sigma, les_dl, les_remove_self_interaction, les_norm_factor: MACE-LES Ewald
+            parameters (``model_type='MACELES'`` only); ``None`` uses the ``les_jax`` defaults,
+            which match torch ``les``.
         **kwargs: Remaining MACE module constructor arguments.
 
     Returns:
@@ -846,51 +908,27 @@ def model(
                     else None
                 ),
             )
-            sanitized_globals = graph.globals.__class__(
-                cell=(
-                    _sanitize(graph.globals.cell, graph_mask_bool, expand_dims=2)
-                    if getattr(graph.globals, 'cell', None) is not None
-                    else None
-                ),
-                energy=(
-                    _sanitize(graph.globals.energy, graph_mask_bool)
-                    if getattr(graph.globals, 'energy', None) is not None
-                    else None
-                ),
-                stress=(
-                    _sanitize(graph.globals.stress, graph_mask_bool, expand_dims=2)
-                    if getattr(graph.globals, 'stress', None) is not None
-                    else None
-                ),
-                weight=graph.globals.weight,
-                head=(
-                    _sanitize(graph.globals.head, graph_mask_bool)
-                    if getattr(graph.globals, 'head', None) is not None
-                    else None
-                ),
-                virials=(
-                    _sanitize(graph.globals.virials, graph_mask_bool, expand_dims=2)
-                    if getattr(graph.globals, 'virials', None) is not None
-                    else None
-                ),
-                dipole=(
-                    _sanitize(graph.globals.dipole, graph_mask_bool, expand_dims=1)
-                    if getattr(graph.globals, 'dipole', None) is not None
-                    else None
-                ),
-                polarizability=(
-                    _sanitize(
-                        graph.globals.polarizability, graph_mask_bool, expand_dims=2
+            # Padding graphs copy the first real graph's cell/targets so nothing downstream
+            # sees zeros in a nonlinear place; fields not listed here (weights, pbc, the
+            # MACE-LES k-grid) pass through unchanged. A padding graph keeps pbc=False and
+            # an all-zero k-grid, which LESMACE treats as "no reciprocal-space term".
+            global_updates = {}
+            for name, expand in (
+                ('cell', 2),
+                ('energy', 0),
+                ('stress', 2),
+                ('head', 0),
+                ('virials', 2),
+                ('dipole', 1),
+                ('polarizability', 2),
+                ('graph_id', 0),
+            ):
+                value = getattr(graph.globals, name, None)
+                if value is not None:
+                    global_updates[name] = _sanitize(
+                        value, graph_mask_bool, expand_dims=expand
                     )
-                    if getattr(graph.globals, 'polarizability', None) is not None
-                    else None
-                ),
-                graph_id=(
-                    _sanitize(graph.globals.graph_id, graph_mask_bool)
-                    if getattr(graph.globals, 'graph_id', None) is not None
-                    else None
-                ),
-            )
+            sanitized_globals = graph.globals._replace(**global_updates)
             sanitized_graph = graph._replace(
                 nodes=sanitized_nodes, edges=sanitized_edges, globals=sanitized_globals
             )
@@ -920,7 +958,39 @@ def model(
         return apply_fn
 
     rngs = nnx.Rngs(initialize_seed or 0)
-    mace_module = modules.MACE(rngs=rngs, **kwargs)
+    model_type = str(model_type)
+    if model_type not in MODEL_TYPES:
+        raise ValueError(
+            f'model_type={model_type!r} is not one of {sorted(MODEL_TYPES)}'
+        )
+    if model_type == 'MACE':
+        mace_module = modules.MACE(rngs=rngs, **kwargs)
+    else:
+        # Scale/shift inside the module: the external transform becomes the identity.
+        scale_shift_kwargs = dict(
+            atomic_inter_scale=np.asarray(std, dtype=float),
+            atomic_inter_shift=np.asarray(mean, dtype=float),
+        )
+        mean, std = 0.0, 1.0
+        if model_type == 'ScaleShiftMACE':
+            mace_module = modules.ScaleShiftMACE(
+                rngs=rngs, **scale_shift_kwargs, **kwargs
+            )
+        else:
+            from les_jax import model as les_model  # noqa: PLC0415
+
+            les_kwargs = {
+                'les_remove_self_interaction': bool(les_remove_self_interaction)
+            }
+            if les_sigma is not None:
+                les_kwargs['les_sigma'] = float(les_sigma)
+            if les_dl is not None:
+                les_kwargs['les_dl'] = float(les_dl)
+            if les_norm_factor is not None:
+                les_kwargs['les_norm_factor'] = float(les_norm_factor)
+            mace_module = les_model.LESMACE(
+                rngs=rngs, **scale_shift_kwargs, **les_kwargs, **kwargs
+            )
     if isinstance(mace_module, nnx.Module):
         graphdef, state = nnx.split(mace_module)
         params_state, config_state, rest_state = nnx.split_state(
