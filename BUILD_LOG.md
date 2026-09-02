@@ -114,3 +114,40 @@ from the full set in the earlier run; here fitted on the subset), scale = RMS fo
   their own grids and were correct). Fixed (`MACEJAXCalculator(graph_transform=...)`), the LES e2e
   test now asserts the reciprocal term changes the energy, the job's evaluation step was cancelled
   and resubmitted as `water_les_eval.sbatch` (job 16780533).
+
+## 2026-09-02 — GPU validation, C–C dataset (job 16780024, H200) and a shared-stack E0 bug
+
+`runs/slurm/cc_scaleshift.sbatch`, swC architecture, ScaleShiftMACE, float64, 25 epochs: 52
+batches/epoch at `batch_max_edges=32768`, **8.3 s/epoch** (5.1 train + 3.3 eval incl. test set),
+789 315 parameters, compile ≈ 7 min (float64, r_max 6, 128x2e). Validation F-RMSE
+1154 → 291 (ep 5) → 144 (10) → 96 (20) → 96 meV/Å (25); held-out test 135 meV/Å at epoch 25
+(the owner's 2026-08-07 run: 141.6 at epoch 20). `mace_jax_eval_configs` on the exported bundle
+reproduces the trainer's numbers (valid 91 vs 96 meV/Å with the final EMA parameters; test 147 vs
+135 — same model, the trainer's last test metric is at epoch 25, the bundle is the final EMA state).
+
+**Energy RMSE stayed at 464–470 meV/atom with MAE = RMSE**, from epoch 5 to 25, on train,
+validation and test alike; the MACE-LES water run showed the same pattern at 76.6 meV/atom (train
+frames −76.8, validation −76.3, 768-atom frames −76.3: a per-atom constant). The owner's 500-epoch
+run had it too (410–430 meV/atom, unchanged through stage two at 10× energy weight). The gradient
+of the energy loss reaches every readout weight (checked directly), so it was not the loss path.
+
+Cause: `gin_model.model()` builds the model's E0 array as `[E0_dict.get(z, 0.0) for z in
+range(num_species)]` — species *indices* used as keys into a dict keyed by *atomic number*. With
+Z = [1, 6, 8] only hydrogen's E0 is found (in the wrong slot), carbon and oxygen get 0.0 silently;
+the exported cc bundle indeed carried `atomic_energies = [0.0, −15.59, 0.0]` against statistics
+{1: −15.59, 6: −299.84, 8: −149.92}. The network then has to produce ~−100 eV/atom per element
+through its readouts; it gets within ~0.5 eV/atom and the rest stays as a per-element offset. Every
+model trained with the gin stack and a statistics/`--E0s` input (all POLYMER v0/sw*/cc/v1 models)
+has this: relative energies and forces are fine, absolute energies and the dissociation asymptote
+are not, which is why the POLYMER parity scripts fit a per-element energy offset before comparing.
+Upstream `fe19806` has the same lines.
+
+Fix: `_atomic_energies_by_species` maps the dict through `atomic_numbers` (species index i ↔
+`atomic_numbers[i]`) and raises on a missing element instead of substituting zero. The e2e test now
+asserts the bundle's `atomic_energies` equal the statistics E0s in element order. GPU runs
+resubmitted to confirm the energies now converge.
+
+Also found in this pass: `export_bundle` for MACE-LES wrote the initial parameters (flax
+`replace_by_pure_dict` fills the State, not the module it came from); `ase_calculator` did not
+attach the Ewald k-grid for MACE-LES. Both fixed; the LES test compares bundle vs checkpoint
+predictions and asserts the reciprocal-space term is active.

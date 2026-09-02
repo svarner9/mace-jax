@@ -189,6 +189,42 @@ def _export_model_config(mace_module: modules.MACE) -> dict:
 MODEL_TYPES = ('MACE', 'ScaleShiftMACE', 'MACELES')
 
 
+def _atomic_energies_by_species(
+    atomic_energies_dict: dict, atomic_numbers, num_species: int
+) -> np.ndarray:
+    """E0 array in species-index order from a dict keyed by atomic number.
+
+    The model indexes ``atomic_energies`` by species index (0 .. num_species-1), while E0 dicts
+    (statistics files, ``--E0s``, isolated-atom frames) are keyed by atomic number. Before this
+    helper the dict was read with the species index as key: for Z = [1, 6, 8] only hydrogen's E0
+    was found (in the wrong slot) and carbon and oxygen got 0.0, silently — the network then had
+    to absorb ~100 eV/atom per element and a per-element energy offset persisted through training.
+    A missing element is an error here, never a zero.
+    """
+    keys = {int(k): float(v) for k, v in atomic_energies_dict.items()}
+    if atomic_numbers is not None:
+        zs = [int(z) for z in atomic_numbers]
+        if len(zs) != num_species:
+            raise ValueError(
+                f'atomic_numbers {zs} has {len(zs)} entries but num_species={num_species}'
+            )
+        missing = [z for z in zs if z not in keys]
+        if missing:
+            raise ValueError(
+                f'atomic_energies has no entry for atomic number(s) {missing}; '
+                f'available: {sorted(keys)}'
+            )
+        return np.array([keys[z] for z in zs], dtype=float)
+    # no element table: the dict must already be keyed by species index
+    missing = [i for i in range(num_species) if i not in keys]
+    if missing:
+        raise ValueError(
+            f'atomic_energies is keyed by {sorted(keys)} but species indices {missing} are '
+            'missing; pass atomic_numbers so the entries can be matched by element'
+        )
+    return np.array([keys[i] for i in range(num_species)], dtype=float)
+
+
 @gin.configurable
 def constant_scaling(graphs, atomic_energies, *, mean=0.0, std=1.0):
     """Return fixed mean/std values for energy normalization.
@@ -729,6 +765,7 @@ def model(
         logging.info(
             f'Computed average Atomic Energies using least squares: {atomic_energies_dict}'
         )
+        # compute_average_E0s keys its result by the species indices found in the graphs
         atomic_energies = np.array(
             [atomic_energies_dict.get(z, 0.0) for z in range(num_species)]
         )
@@ -736,8 +773,8 @@ def model(
         logging.info(
             f'Using atomic energies from isolated atoms in the dataset: {atomic_energies_dict}'
         )
-        atomic_energies = np.array(
-            [atomic_energies_dict.get(z, 0.0) for z in range(num_species)]
+        atomic_energies = _atomic_energies_by_species(
+            atomic_energies_dict, atomic_numbers, num_species
         )
     elif atomic_energies == 'zero':
         logging.info('Not using atomic energies')
@@ -754,8 +791,8 @@ def model(
     elif isinstance(atomic_energies, dict):
         atomic_energies_dict = atomic_energies
         logging.info(f'Use Atomic Energies that are provided: {atomic_energies_dict}')
-        atomic_energies = np.array(
-            [atomic_energies_dict.get(z, 0.0) for z in range(num_species)]
+        atomic_energies = _atomic_energies_by_species(
+            atomic_energies_dict, atomic_numbers, num_species
         )
     else:
         raise ValueError(f'atomic_energies={atomic_energies} is not supported')

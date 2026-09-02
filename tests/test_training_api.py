@@ -9,6 +9,7 @@ and forces consistent with finite differences, MACE-LES batches carry a k-grid.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 from pathlib import Path
@@ -216,6 +217,13 @@ def test_bundle_config_records_the_model_definition(trained_scaleshift):
     assert abs(config['normalize2mom_consts']['silu'] - 1.6742560863) < 1e-6
     # scale/shift live inside the model, so the external transform is the identity
     assert float(config['output_mean']) == 0.0 and float(config['output_std']) == 1.0
+    # E0s enter the model in element order (Z = 13, 29), not by species index: this was
+    # silently wrong for every element whose Z is not a valid species index
+    stats = json.loads(result.data.statistics_file.read_text())
+    e0 = {int(k): float(v) for k, v in ast.literal_eval(stats['atomic_energies']).items()}
+    assert config['atomic_numbers'] == [13, 29]
+    np.testing.assert_allclose(config['atomic_energies'], [e0[13], e0[29]], rtol=1e-6)
+    assert all(abs(x) > 1.0 for x in config['atomic_energies'])
     assert config['source']['statistics'].endswith('statistics.json')
 
 
