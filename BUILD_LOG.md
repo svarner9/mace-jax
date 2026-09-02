@@ -189,3 +189,22 @@ Before the fix at epoch 6: E 76.8 (a per-atom constant), F 68.4. Exported bundle
 validation frames via `mace_jax_eval_configs` (ASE path, per-structure k-grid): E 1.60 meV/atom,
 F 40.47 meV/Å. For scale: the full 400-epoch `water_les_d3` training on 15 344 frames reached
 0.21 meV/atom and 6.3 meV/Å.
+
+## 2026-09-02 — closing state
+
+- Full CPU suite after every fix: **201 passed, 36 skipped, 1 failed** — the failure is the known
+  order-dependent `test_blocks::TestNonLinearReadoutBlock` case (process-global `normalize2mom`
+  registry, UPSTREAM.md "known limitations"); it passes when run alone and passed in an earlier
+  full run. Login nodes SIGKILL long processes intermittently (exit 137); the suite takes ~5 min
+  and fits when the node is quiet.
+- Exported C–C bundle evaluated through the trainer's own streaming loader (`mace-jax-predict`,
+  all four test shards, edge budget 3000) and through the ASE calculator: both give F 106.5 meV/Å,
+  E 20.05 meV/atom on the 33 test frames. The trainer's logged test metric at the last epoch was
+  116.7 meV/Å with the same energy — the two evaluation paths agree with each other, so the gap is
+  between the last logged metric and the exported parameters or the padding layout; a
+  padding-independence job (`runs/slurm/cc_padding.sbatch`, edge budget 3000 vs 32768 on the same
+  frames) is queued to settle which. Open item; does not affect training or the exported model.
+- Follow-up to the E0 fix: when no element table is configured the model infers it from the E0
+  dict (species indices ascend with atomic number) and records it, instead of writing
+  `atomic_numbers = (0, 1, ...)`; the trainer also binds it from the loader. The upstream gin tests
+  exercise this path.
