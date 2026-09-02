@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Console entry point for PYTHONPATH-based use (env/mace-jax.sh); pip installs the same name.
+exec python -m mace_jax.cli.mace_jax_from_torch "$@"

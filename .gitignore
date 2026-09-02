@@ -25,3 +25,10 @@ results
 
 # Nox
 .nox
+
+# JAX / CG compile caches and run artifacts
+.jax_cache/
+.cg_transform_cache/
+runs/
+*.log
+!tests/**/*.log
