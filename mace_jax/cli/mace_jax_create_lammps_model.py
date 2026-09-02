@@ -11,7 +11,7 @@ from flax import serialization
 from mace.tools.scripts_utils import extract_config_mace_model
 
 from mace_jax.calculators.lammps_mliap_mace import create_lammps_mliap_calculator
-from mace_jax.nnx_utils import state_to_pure_dict
+from mace_jax.nnx_utils import state_to_serializable_dict
 
 from .mace_jax_from_torch import convert_model
 
@@ -77,7 +77,7 @@ def main() -> None:
     config['torch_model_class'] = torch_model.__class__.__name__
 
     graphdef, state, _ = convert_model(torch_model, config)
-    variables = state_to_pure_dict(state)
+    variables = state_to_serializable_dict(state)
 
     if args.dtype == 'float32':
         variables = jax.tree_util.tree_map(lambda x: x.astype('float32'), variables)

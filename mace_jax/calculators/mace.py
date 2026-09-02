@@ -72,7 +72,12 @@ class MACEJAXCalculator(Calculator):
         Calculator.calculate(self, atoms)
 
         # prepare data
-        config = data.config_from_atoms(atoms)
+        # Inference needs geometry only.  Calling config_from_atoms on an Atoms
+        # object carrying this calculator asks it for energy/stress again and
+        # recursively re-enters calculate().
+        geometry = atoms.copy()
+        geometry.calc = None
+        config = data.config_from_atoms(geometry)
         if self.z_table is not None:
             config.atomic_numbers = self.z_table(config.atomic_numbers)
 

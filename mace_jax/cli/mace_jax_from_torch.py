@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import warnings
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -92,6 +93,7 @@ def _maybe_update_hidden_irreps_from_torch(
 
 
 def _serialize_for_json(value: Any) -> Any:
+    torch_module = sys.modules.get('torch')
     if is_dataclass(value):
         return {str(k): _serialize_for_json(v) for k, v in asdict(value).items()}
     if isinstance(value, dict):
@@ -100,16 +102,16 @@ def _serialize_for_json(value: Any) -> Any:
         return [_serialize_for_json(v) for v in value]
     if isinstance(value, set):
         return [_serialize_for_json(v) for v in sorted(value)]
-    if isinstance(value, torch.Tensor):
+    if torch_module is not None and isinstance(value, torch_module.Tensor):
         arr = value.detach().cpu().numpy()
         if arr.ndim == 0:
             return arr.item()
         return arr.tolist()
-    if isinstance(value, torch.device):
+    if torch_module is not None and isinstance(value, torch_module.device):
         return str(value)
-    if isinstance(value, torch.dtype):
+    if torch_module is not None and isinstance(value, torch_module.dtype):
         return str(value).replace('torch.', '')
-    if isinstance(value, torch.Size):
+    if torch_module is not None and isinstance(value, torch_module.Size):
         return list(value)
     if isinstance(value, np.ndarray):
         return value.tolist()
@@ -235,7 +237,10 @@ def main():
     config['torch_model_class'] = torch_model.__class__.__name__
 
     _, state, _ = convert_model(torch_model, config)
-    variables = state_to_pure_dict(state)
+    # ConfigVar leaves may contain ConfigDict wrappers used as JAX pytrees.
+    # Flax msgpack cannot encode those wrappers directly; normalize them to
+    # plain dictionaries for the on-disk bundle.
+    variables = state_to_serializable_dict(state)
 
     params_bytes = serialization.to_bytes(variables)
     output_path.write_bytes(params_bytes)

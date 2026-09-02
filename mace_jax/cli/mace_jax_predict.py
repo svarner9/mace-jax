@@ -73,6 +73,18 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help='Override JAX dtype mode when loading the model bundle.',
     )
     parser.add_argument(
+        '--output-mean',
+        type=float,
+        default=None,
+        help='Override the serialized per-atom output shift (legacy checkpoints).',
+    )
+    parser.add_argument(
+        '--output-std',
+        type=float,
+        default=None,
+        help='Override the serialized energy/force output scale (legacy checkpoints).',
+    )
+    parser.add_argument(
         '--batch-max-edges',
         type=int,
         default=None,
@@ -265,11 +277,15 @@ def _build_predictor(
     compute_forces: bool,
     compute_stress: bool,
     full_outputs: bool,
+    output_mean: float | None = None,
+    output_std: float | None = None,
 ):
     atomic_numbers = model_config.get('atomic_numbers') or []
     num_species = int(len(atomic_numbers))
     if num_species <= 0:
         raise ValueError('Model config is missing atomic_numbers for prediction.')
+    mean = model_config.get('output_mean', 0.0) if output_mean is None else output_mean
+    std = model_config.get('output_std', 1.0) if output_std is None else output_std
 
     keep_keys: set[str] | None = None
     if not full_outputs:
@@ -281,10 +297,17 @@ def _build_predictor(
 
     def _predict(params, graph):
         outputs, _ = graphdef.apply(params)(
-            gin_model._graph_to_data(graph, num_species=num_species),
+            gin_model._graph_to_data(
+                graph,
+                num_species=num_species,
+                padded_edge_length=float(model_config['r_max']) + 1.0,
+            ),
             compute_force=compute_forces,
             compute_stress=compute_stress,
             compute_node_feats=full_outputs,
+        )
+        outputs = gin_model._apply_output_normalization(
+            outputs, graph, mean=mean, std=std
         )
         if full_outputs:
             return outputs
@@ -529,6 +552,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         compute_forces=args.compute_forces,
         compute_stress=args.compute_stress,
         full_outputs=bool(args.full_outputs),
+        output_mean=args.output_mean,
+        output_std=args.output_std,
     )
 
     inputs = [Path(path).expanduser() for path in args.inputs]
