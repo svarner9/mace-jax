@@ -227,3 +227,6 @@ semantics differences. Each was re-verified against the torch 0.3.15 source and 
 
 Not changed: E0s (consistent after the fix above), model classes and LES constants (identical),
 optimizer / scheduler / EMA / clipping (same code), early stopping (ours has it, `train_paper` not).
+
+Full CPU suite after the review changes: **202 passed, 36 skipped, 0 failed** (5:23, login node).
+Still open: the padding-independence job (`cc_padding.sbatch`, queued on the CPU partition).
