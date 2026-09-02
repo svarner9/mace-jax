@@ -90,11 +90,13 @@ def export_bundle(
     model_class = _model_class(config)
     config['model_class'] = model_class
 
-    module, _, state = _full_state(config, state_pure, dtype=dtype)
+    _, _, state = _full_state(config, state_pure, dtype=dtype)
+    # `state` (not the module) holds the loaded parameters: nnx.replace_by_pure_dict returns new
+    # variables inside the State and leaves the module it was split from untouched.
 
     if model_class == 'LESMACE':
         out.mkdir(parents=True, exist_ok=True)
-        _, params, _ = nnx.split(module, nnx.Param, ...)
+        params, _ = nnx.split_state(state, nnx.Param, ...)
         (out / 'config.json').write_text(json.dumps(config, indent=1))
         (out / 'params.msgpack').write_bytes(serialization.to_bytes(nnx.to_pure_dict(params)))
         return out

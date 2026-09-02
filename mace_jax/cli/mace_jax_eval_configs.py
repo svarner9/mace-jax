@@ -48,6 +48,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     frames = ase.io.read(args.configs, index=':')
     e_ref, e_pred, f_ref, f_pred, n_atoms = [], [], [], [], []
     for atoms in frames:
+        # ASE moves `energy`/`forces` columns of an extxyz file into a SinglePointCalculator;
+        # other key names stay in info/arrays. Look in both places for the reference values.
+        ref_results = dict(getattr(atoms.calc, 'results', {}) or {})
+        ref_energy = atoms.info.get(args.energy_key, ref_results.get(args.energy_key))
+        ref_forces = atoms.arrays.get(args.forces_key, ref_results.get(args.forces_key))
         atoms.calc = calc
         energy = float(atoms.get_potential_energy())
         forces = np.asarray(atoms.get_forces())
@@ -56,12 +61,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.compute_stress and atoms.pbc.any():
             atoms.info[f'{args.info_prefix}stress'] = np.asarray(atoms.get_stress(voigt=True))
         atoms.calc = None
-        if args.energy_key in atoms.info:
-            e_ref.append(float(atoms.info[args.energy_key]))
+        if ref_energy is not None:
+            atoms.info[args.energy_key] = float(ref_energy)
+            e_ref.append(float(ref_energy))
             e_pred.append(energy)
             n_atoms.append(len(atoms))
-        if args.forces_key in atoms.arrays:
-            f_ref.append(np.asarray(atoms.arrays[args.forces_key]))
+        if ref_forces is not None:
+            atoms.arrays[args.forces_key] = np.asarray(ref_forces)
+            f_ref.append(np.asarray(ref_forces))
             f_pred.append(forces)
     ase.io.write(args.output, frames, format='extxyz')
     print(f'{len(frames)} structures -> {args.output}')

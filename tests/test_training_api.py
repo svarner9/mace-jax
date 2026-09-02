@@ -231,19 +231,27 @@ def test_bundle_loads_standalone_and_forces_match_finite_differences(trained_sca
     assert np.abs(forces - fd).max() < 2e-4, np.abs(forces - fd).max()
 
 
-def test_bundle_matches_checkpoint_predictions(trained_scaleshift, cluster_xyz):
+def _assert_same_predictions(path_a, path_b, atoms, tol=1e-8):
+    """Two model files must give the same energy and forces on `atoms` (float64)."""
+    atoms = atoms.copy()
+    atoms.calc = ase_calculator(path_a, dtype='float64')
+    e1, f1 = atoms.get_potential_energy(), atoms.get_forces()
+    atoms.calc = ase_calculator(path_b, dtype='float64')
+    e2, f2 = atoms.get_potential_energy(), atoms.get_forces()
+    assert np.isfinite(e1) and abs(e1 - e2) < tol, (e1, e2)
+    assert np.abs(f1 - f2).max() < tol
+
+
+def test_bundle_matches_checkpoint_predictions(trained_scaleshift, cluster_xyz, tmp_path):
+    """A bundle exported from a checkpoint is the same model as the checkpoint (guards against
+    writing initial parameters instead of the loaded ones)."""
     _, result = trained_scaleshift
     atoms = ase.io.read(cluster_xyz / 'test.xyz', index=1)
-    from_bundle = ase_calculator(result.bundle, dtype='float64')
-    from_ckpt = ase_calculator(result.best_checkpoint, dtype='float64')
-    atoms.calc = from_bundle
-    e1, f1 = atoms.get_potential_energy(), atoms.get_forces()
-    atoms.calc = from_ckpt
-    e2, f2 = atoms.get_potential_energy(), atoms.get_forces()
-    # the best checkpoint and the final evaluation parameters may differ (early stopping), but
-    # both must load through the same path and give finite, same-magnitude results
-    assert np.isfinite(e1) and np.isfinite(e2)
-    assert f1.shape == f2.shape == (len(atoms), 3)
+    exported = export_bundle(result.best_checkpoint, tmp_path / 'from_best')
+    _assert_same_predictions(exported, result.best_checkpoint, atoms)
+    # and the run's own export equals its final evaluation parameters (last epoch checkpoint)
+    last = sorted(result.checkpoint_dir.glob('*_epoch*.ckpt'))[-1]
+    _assert_same_predictions(result.bundle, last, atoms)
 
 
 def test_export_cli_rewrites_a_checkpoint(trained_scaleshift, tmp_path):
@@ -333,6 +341,7 @@ def test_maceles_trains_on_periodic_data_and_exports_directory_bundle(periodic_x
         model='MACELES',
         batch_size=4,
         max_num_epochs=2,
+        checkpoint_every=1,
         device='cpu',
         **TINY_MODEL,
     )
@@ -360,3 +369,8 @@ def test_maceles_trains_on_periodic_data_and_exports_directory_bundle(periodic_x
     atoms.calc = calc
     energy_without_kgrid = atoms.get_potential_energy()
     assert abs(energy_without_kgrid - energy) > 1e-6
+    # the directory bundle holds the trained parameters, not the initial ones
+    last = sorted(result.checkpoint_dir.glob('*_epoch*.ckpt'))[-1]
+    _assert_same_predictions(result.bundle, last, atoms)
+    reexported = export_bundle(result.best_checkpoint, tmp_path / 'les_from_best')
+    _assert_same_predictions(reexported, result.best_checkpoint, atoms)
