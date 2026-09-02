@@ -150,6 +150,22 @@ def get_outputs(
     edge_index = data['edge_index']
     batch = data['batch']
     num_graphs = int(jnp.size(data['ptr']) - 1)
+    graph_mask = jnp.asarray(
+        data.get('graph_mask', jnp.ones((num_graphs,), dtype=bool)),
+        dtype=bool,
+    )
+
+    def masked_energy_sum(per_graph_energy):
+        """Exclude padding graphs before the force-producing reduction.
+
+        A padded graph can traverse nonlinear model stages even though its
+        loss weight is zero. Selecting real graph energies here prevents that
+        disconnected padding branch from contributing to forces or their
+        higher derivatives, including when a padding-only intermediate is
+        nonfinite.
+        """
+
+        return jnp.sum(jnp.where(graph_mask, per_graph_energy, 0.0))
 
     displacement = jnp.zeros((num_graphs, 3, 3), dtype=positions.dtype)
 
@@ -170,12 +186,12 @@ def get_outputs(
             cell_reshaped[batch[edge_index[0]]],
         )
         per_graph_energy = energy_fn(deformed_positions, shifts=shifts)
-        return jnp.sum(per_graph_energy), per_graph_energy
+        return masked_energy_sum(per_graph_energy), per_graph_energy
 
     def energy_sum_fn(pos):
         """Return (total energy, per-graph energy) for the un-deformed geometry."""
         per_graph_energy = energy_fn(pos)
-        return jnp.sum(per_graph_energy), per_graph_energy
+        return masked_energy_sum(per_graph_energy), per_graph_energy
 
     def _ensure_energy(value: jnp.ndarray) -> jnp.ndarray:
         return jnp.atleast_1d(jnp.asarray(value))
@@ -277,12 +293,24 @@ def get_edge_vectors_and_lengths(
     shifts: jnp.ndarray,  # [n_edges, 3]
     normalize: bool = False,
     eps: float = 1e-9,
+    edge_mask: jnp.ndarray | None = None,
+    padded_edge_length: float = 1.0,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     sender = edge_index[0]  # [n_edges]
     receiver = edge_index[1]  # [n_edges]
 
     # edge vectors
     vectors = positions[receiver] - positions[sender] + shifts  # [n_edges, 3]
+
+    if edge_mask is not None:
+        # jraph pads edges as zero-length self edges.  Their forward values can
+        # be masked later, but force training differentiates through the norm a
+        # second time and d2|r|/dr2 is undefined at r=0.  Replace padded vectors
+        # with a position-independent sentinel; callers choose a length beyond
+        # the interaction cutoff so the padded contribution is also zero.
+        edge_mask = jnp.asarray(edge_mask, dtype=bool).reshape(-1, 1)
+        safe_vector = jnp.zeros_like(vectors).at[:, 0].set(padded_edge_length)
+        vectors = jnp.where(edge_mask, vectors, safe_vector)
 
     # lengths (keep last dim)
     lengths = jnp.linalg.norm(vectors, axis=-1, keepdims=True)  # [n_edges, 1]
@@ -376,6 +404,8 @@ def prepare_graph(
         positions=positions,
         edge_index=edge_index,
         shifts=shifts,
+        edge_mask=data.get('edge_mask'),
+        padded_edge_length=data.get('padded_edge_length', 1.0),
     )
     ikw = InteractionKwargs(None, (0, 0))
 

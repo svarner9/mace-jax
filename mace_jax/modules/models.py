@@ -372,14 +372,35 @@ class MACE(nnx.Module):
         self.products = nnx.List(products)
         self.readouts = nnx.List(readouts)
 
-    def __call__(
+    def _nemora_message_delta(self, *, idx, message, sc, data, ctx):
+        """NEMORA insertion hook, message site (interaction output, pre-product).
+
+        Base MACE has no NEMORA — returns None (bit-identical no-op). A
+        NEMORA-enabled subclass overrides this to return an additive delta.
+        """
+        return None
+
+    def _nemora_delta(self, *, idx, node_feats, data, ctx):
+        """NEMORA insertion hook, feature site (product output = torch
+        ``products[idx]`` hook payload; ``idx == num_interactions - 2`` is the
+        torch att=-2 default).
+
+        Base MACE has no NEMORA — returns None (bit-identical no-op).
+        """
+        return None
+
+    def _forward_core(
         self,
         data: dict[str, jnp.ndarray],
         *,
         lammps_mliap: bool = False,
         lammps_class: Any | None = None,
-        compute_node_feats: bool = True,
-    ) -> dict[str, jnp.ndarray | None]:
+        compute_pair_energy: bool = False,
+    ) -> dict[str, Any]:
+        """Shared forward body: graph prep, embeddings, E0, pair repulsion, and
+        the interaction/product loop (with NEMORA hook sites). Energy-combination
+        tails live in ``MACE.__call__`` / ``ScaleShiftMACE.__call__``.
+        """
         ctx = prepare_graph(
             data,
             lammps_mliap=lammps_mliap,
@@ -444,16 +465,20 @@ class MACE(nnx.Module):
             )
             if lammps_class is not None:
                 pair_node_energy = pair_node_energy[:n_real]
-            pair_energy = scatter_sum(
-                src=pair_node_energy,
-                index=data['batch'],
-                dim=-1,
-                dim_size=ctx.num_graphs,
-                indices_are_sorted=True,
+            pair_energy = (
+                scatter_sum(
+                    src=pair_node_energy,
+                    index=data['batch'],
+                    dim=-1,
+                    dim_size=ctx.num_graphs,
+                    indices_are_sorted=True,
+                )
+                if compute_pair_energy
+                else None
             )
         else:
             pair_node_energy = jnp.zeros_like(node_e0)
-            pair_energy = jnp.zeros_like(e0)
+            pair_energy = jnp.zeros_like(e0) if compute_pair_energy else None
 
         if self._embedding_specs:
             embedding_features = {name: data[name] for name in self._embedding_names}
@@ -471,9 +496,13 @@ class MACE(nnx.Module):
                 )
                 e0 += embedding_energy
 
-        energies = [e0, pair_energy]
-        node_energies_list = [node_e0, pair_node_energy]
-        node_feats_concat: list[jnp.ndarray] = []
+        node_feats_list: list[jnp.ndarray] = []
+        # Pre-product interaction messages, one per layer.  They carry the full
+        # ``interaction.target_irreps`` (l = 0..max_ell) even when the product
+        # output is collapsed to scalars, so subclasses can read equivariant
+        # per-atom quantities (latent dipoles / quadrupoles) without touching
+        # the backbone.
+        message_list: list[jnp.ndarray] = []
 
         node_attrs_full = node_attrs
         node_attrs_index_full = node_attrs_index
@@ -503,6 +532,14 @@ class MACE(nnx.Module):
                 n_real=n_real if lammps_class is not None else None,
                 first_layer=(idx == 0),
             )
+            message_delta = self._nemora_message_delta(
+                idx=idx, message=node_feats, sc=sc, data=data, ctx=ctx
+            )
+            if message_delta is not None:
+                node_feats = node_feats + message_delta
+            message_list.append(
+                node_feats if lammps_class is None else node_feats[:n_real]
+            )
             if lammps_class is not None and idx == 0:
                 node_attrs_slice = node_attrs_slice[:n_real]
                 if node_attrs_index_slice is not None:
@@ -516,7 +553,50 @@ class MACE(nnx.Module):
             if lammps_class is not None:
                 node_feats = node_feats[:n_real]
 
-            node_feats_concat.append(node_feats)
+            feature_delta = self._nemora_delta(
+                idx=idx, node_feats=node_feats, data=data, ctx=ctx
+            )
+            if feature_delta is not None:
+                node_feats = node_feats + feature_delta
+
+            node_feats_list.append(node_feats)
+
+        return dict(
+            ctx=ctx,
+            node_heads=node_heads,
+            num_atoms_arange=num_atoms_arange,
+            node_e0=node_e0,
+            e0=e0,
+            pair_node_energy=pair_node_energy,
+            pair_energy=pair_energy,
+            node_feats=node_feats,
+            node_feats_list=node_feats_list,
+            message_list=message_list,
+        )
+
+    def __call__(
+        self,
+        data: dict[str, jnp.ndarray],
+        *,
+        lammps_mliap: bool = False,
+        lammps_class: Any | None = None,
+        compute_node_feats: bool = True,
+    ) -> dict[str, jnp.ndarray | None]:
+        core = self._forward_core(
+            data,
+            lammps_mliap=lammps_mliap,
+            lammps_class=lammps_class,
+            compute_pair_energy=True,
+        )
+        ctx = core['ctx']
+        node_heads = core['node_heads']
+        num_atoms_arange = core['num_atoms_arange']
+        e0 = core['e0']
+        node_feats = core['node_feats']
+        node_feats_concat = core['node_feats_list']
+
+        energies = [e0, core['pair_energy']]
+        node_energies_list = [core['node_e0'], core['pair_node_energy']]
 
         for idx, readout in enumerate(self.readouts):
             feat_idx = -1 if len(self.readouts) == 1 else idx
@@ -581,133 +661,21 @@ class ScaleShiftMACE(MACE):
         lammps_class: Any | None = None,
         compute_node_feats: bool = True,
     ) -> dict[str, jnp.ndarray | None]:
-        ctx = prepare_graph(
+        core = self._forward_core(
             data,
             lammps_mliap=lammps_mliap,
-            lammps_class=data.get('lammps_class', lammps_class),
+            lammps_class=lammps_class,
+            compute_pair_energy=False,
         )
-        num_atoms_arange = ctx.num_atoms_arange
-        node_heads = ctx.node_heads
-        interaction_kwargs = ctx.interaction_kwargs
-        lammps_class = interaction_kwargs.lammps_class
-        lammps_natoms = interaction_kwargs.lammps_natoms
-        n_real = int(num_atoms_arange.shape[0])
-        if lammps_class is not None:
-            n_real = int(lammps_natoms[0])
-        node_attrs = data['node_attrs']
-        need_node_attrs_index = self.pair_repulsion or self.distance_transform in {
-            'Agnesi',
-            'Soft',
-        }
-        if self.cueq_config is not None and getattr(self.cueq_config, 'enabled', False):
-            need_node_attrs_index = need_node_attrs_index or bool(
-                getattr(self.cueq_config, 'optimize_all', False)
-                or getattr(self.cueq_config, 'optimize_symmetric', False)
-            )
-        node_attrs_index = data.get('node_attrs_index')
-        if node_attrs_index is None:
-            node_attrs_index = data.get('node_type')
-        if node_attrs_index is None:
-            node_attrs_index = data.get('species')
-        if node_attrs_index is not None and getattr(node_attrs_index, 'ndim', 1) != 1:
-            node_attrs_index = None
-        if node_attrs_index is None and need_node_attrs_index:
-            node_attrs_index = jnp.argmax(node_attrs, axis=1)
-        if node_attrs_index is not None:
-            node_attrs_index = jnp.asarray(node_attrs_index, dtype=jnp.int32)
+        ctx = core['ctx']
+        node_heads = core['node_heads']
+        num_atoms_arange = core['num_atoms_arange']
+        node_e0 = core['node_e0']
+        e0 = core['e0']
+        node_feats = core['node_feats']
+        node_feats_list = core['node_feats_list']
 
-        node_e0 = self.atomic_energies_fn(node_attrs)[num_atoms_arange, node_heads]
-        e0 = scatter_sum(
-            src=node_e0,
-            index=data['batch'],
-            dim=0,
-            dim_size=ctx.num_graphs,
-            indices_are_sorted=True,
-        ).astype(ctx.vectors.dtype)
-
-        node_feats = self.node_embedding(node_attrs)
-        edge_attrs = self.spherical_harmonics(ctx.vectors)
-        edge_feats, cutoff = self.radial_embedding(
-            ctx.lengths,
-            node_attrs,
-            data['edge_index'],
-            self._atomic_numbers,
-            node_attrs_index=node_attrs_index,
-        )
-
-        if self.pair_repulsion:
-            pair_node_energy = self.pair_repulsion_fn(
-                ctx.lengths,
-                node_attrs,
-                data['edge_index'],
-                self._atomic_numbers,
-                node_attrs_index=node_attrs_index,
-            )
-            if lammps_class is not None:
-                pair_node_energy = pair_node_energy[:n_real]
-        else:
-            pair_node_energy = jnp.zeros_like(node_e0)
-
-        if self._embedding_specs:
-            embedding_features = {name: data[name] for name in self._embedding_names}
-            node_feats += self.joint_embedding(data['batch'], embedding_features)
-            if self.use_embedding_readout:
-                embedding_node_energy = self.embedding_readout(
-                    node_feats, node_heads
-                ).squeeze(-1)
-                e0 += scatter_sum(
-                    src=embedding_node_energy,
-                    index=data['batch'],
-                    dim=0,
-                    dim_size=ctx.num_graphs,
-                    indices_are_sorted=True,
-                )
-
-        node_energies_list = [pair_node_energy]
-        node_feats_list: list[jnp.ndarray] = []
-
-        node_attrs_full = node_attrs
-        node_attrs_index_full = node_attrs_index
-
-        for idx, (interaction, product) in enumerate(
-            zip(self.interactions, self.products)
-        ):
-            if lammps_class is not None and idx > 0:
-                node_feats = _apply_lammps_exchange(
-                    node_feats, lammps_class, lammps_natoms
-                )
-
-            node_attrs_slice = node_attrs_full
-            node_attrs_index_slice = node_attrs_index_full
-            if lammps_class is not None and idx > 0:
-                node_attrs_slice = node_attrs_slice[:n_real]
-                if node_attrs_index_slice is not None:
-                    node_attrs_index_slice = node_attrs_index_slice[:n_real]
-
-            node_feats, sc = interaction(
-                node_attrs=node_attrs_slice,
-                node_feats=node_feats,
-                edge_attrs=edge_attrs,
-                edge_feats=edge_feats,
-                edge_index=data['edge_index'],
-                cutoff=cutoff,
-                n_real=n_real if lammps_class is not None else None,
-                first_layer=(idx == 0),
-            )
-            if lammps_class is not None and idx == 0:
-                node_attrs_slice = node_attrs_slice[:n_real]
-                if node_attrs_index_slice is not None:
-                    node_attrs_index_slice = node_attrs_index_slice[:n_real]
-            node_feats = product(
-                node_feats=node_feats,
-                sc=sc,
-                node_attrs=node_attrs_slice,
-                node_attrs_index=node_attrs_index_slice,
-            )
-            if lammps_class is not None:
-                node_feats = node_feats[:n_real]
-
-            node_feats_list.append(node_feats)
+        node_energies_list = [core['pair_node_energy']]
 
         for idx, readout in enumerate(self.readouts):
             feat_idx = -1 if len(self.readouts) == 1 else idx
