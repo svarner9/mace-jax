@@ -4,10 +4,27 @@ import types
 
 import jax.numpy as jnp
 import pytest
+import torch
 from flax import nnx
 
 from mace_jax.cli import mace_jax_from_torch as jax_from_torch
 from mace_jax.nnx_utils import state_to_pure_dict
+
+
+def test_serialize_for_json_handles_locally_imported_torch_types():
+    value = {
+        'tensor': torch.tensor([1.0, 2.0]),
+        'device': torch.device('cpu'),
+        'dtype': torch.float32,
+        'size': torch.Size([2, 3]),
+    }
+
+    assert jax_from_torch._serialize_for_json(value) == {
+        'tensor': [1.0, 2.0],
+        'device': 'cpu',
+        'dtype': 'float32',
+        'size': [2, 3],
+    }
 
 
 def _patch_common(monkeypatch, jax_model):

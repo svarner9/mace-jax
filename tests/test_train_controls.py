@@ -12,7 +12,7 @@ from mace_jax.data import (
     StreamingDatasetSpec,
     StreamingGraphDataLoader,
 )
-from mace_jax.tools.train import train as train_loop
+from mace_jax.tools.train import _sanitize_grads, train as train_loop
 from tests.conftest import _write_hdf5_from_configs
 
 
@@ -20,6 +20,18 @@ from tests.conftest import _write_hdf5_from_configs
 def _force_single_device(monkeypatch):
     """Keep unit tests deterministic on multi-device hosts."""
     monkeypatch.setattr(jax, 'local_device_count', lambda: 1)
+
+
+def test_sanitize_grads_zeros_all_nonfinite_values():
+    grads = {
+        'weight': jnp.array([jnp.nan, jnp.inf, -jnp.inf, 2.0], dtype=jnp.float32)
+    }
+
+    sanitized = _sanitize_grads(grads)
+
+    np.testing.assert_array_equal(
+        sanitized['weight'], jnp.array([0.0, 0.0, 0.0, 2.0], dtype=jnp.float32)
+    )
 
 
 def _make_streaming_loader(tmp_path, targets: list[float]) -> StreamingGraphDataLoader:

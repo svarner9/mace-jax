@@ -1,9 +1,11 @@
 import json
+import pickle
 
 import numpy as np
 from flax import nnx, serialization
 
-from mace_jax.nnx_utils import state_to_serializable_dict
+from mace_jax.nnx_config import ConfigVar
+from mace_jax.nnx_utils import state_to_pure_dict, state_to_serializable_dict
 from mace_jax.tools import bundle as bundle_tools
 from mace_jax.tools import model_builder
 
@@ -64,6 +66,47 @@ def test_bundle_roundtrip(tmp_path):
         template,
         compute_force=False,
         compute_stress=False,
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(actual['energy']),
+        np.asarray(expected['energy']),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_training_checkpoint_params_config_roundtrip(tmp_path):
+    config = _small_config()
+    config, _, _ = model_builder._normalize_atomic_config(config)
+    model = model_builder._build_jax_model(config, rngs=nnx.Rngs(0))
+    graphdef, state = nnx.split(model)
+    params_state, config_state, rest_state = nnx.split_state(
+        state, nnx.Param, ConfigVar, ...
+    )
+    if rest_state:
+        config_state = nnx.merge_state(config_state, rest_state)
+
+    checkpoint = tmp_path / 'model.ckpt'
+    with checkpoint.open('wb') as handle:
+        pickle.dump(
+            {
+                'model_config': config,
+                'eval_params': {
+                    'params': state_to_pure_dict(params_state),
+                    'config': state_to_pure_dict(config_state),
+                },
+            },
+            handle,
+        )
+
+    bundle = bundle_tools.load_model_bundle(str(checkpoint), dtype='float64')
+    template = model_builder._prepare_template_data(config)
+    expected, _ = graphdef.apply(state)(
+        template, compute_force=False, compute_stress=False
+    )
+    actual, _ = bundle.graphdef.apply(bundle.params)(
+        template, compute_force=False, compute_stress=False
     )
 
     np.testing.assert_allclose(

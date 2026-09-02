@@ -376,7 +376,6 @@ class TestSymmetricContractionImport:
         np.testing.assert_allclose(jax_output_np, torch_output, rtol=1e-6, atol=1e-6)
 
     def test_forward_matches_native_high_correlation(self, torch_device):
-        """Expected to fail until native high-order import is harmonised."""
         irreps_in = Irreps('2x0e + 2x1o + 2x2e')
         irreps_out = Irreps('2x0e + 2x1o')
         correlation = 2
@@ -444,3 +443,63 @@ class TestSymmetricContractionImport:
             )
 
         np.testing.assert_allclose(jax_output_np, torch_output, rtol=1e-5, atol=1e-4)
+
+    def test_full_cg_scalar_output_uses_full_basis_transform(self, torch_device):
+        """Full/reduced dimensions coincide here but their coordinates do not."""
+        irreps_in = Irreps('2x0e + 2x1o + 2x2e')
+        irreps_out = Irreps('2x0e')
+        correlation = 2
+        num_elements = 1
+
+        module = SymmetricContraction(
+            irreps_in=irreps_in,
+            irreps_out=irreps_out,
+            correlation=correlation,
+            num_elements=num_elements,
+            use_reduced_cg=False,
+            rngs=nnx.Rngs(0),
+        )
+        torch_module = (
+            SymmetricContractionWrapper(
+                irreps_in=o3.Irreps(str(irreps_in)),
+                irreps_out=o3.Irreps(str(irreps_out)),
+                correlation=correlation,
+                num_elements=num_elements,
+                use_reduced_cg=False,
+            )
+            .to(torch_device)
+            .eval()
+        )
+
+        module, _ = init_from_torch(module, torch_module)
+        graphdef, state = nnx.split(module)
+        batch = 5
+        feature_dim = sum(term.ir.dim for term in irreps_in)
+        inputs = jax.random.normal(
+            jax.random.PRNGKey(7),
+            (batch, irreps_in[0].mul, feature_dim),
+            dtype=_jax_float_dtype(),
+        )
+        attrs = jnp.ones((batch, num_elements), dtype=inputs.dtype)
+
+        jax_output, _ = graphdef.apply(state)(inputs, attrs)
+        with torch.no_grad():
+            torch_output = torch_module(
+                torch.tensor(
+                    np.asarray(inputs),
+                    dtype=_module_dtype(torch_module),
+                    device=torch_device,
+                ),
+                torch.tensor(
+                    np.asarray(attrs),
+                    dtype=_module_dtype(torch_module),
+                    device=torch_device,
+                ),
+            )
+
+        np.testing.assert_allclose(
+            np.asarray(jax_output).reshape(batch, -1),
+            torch_output.cpu().numpy().reshape(batch, -1),
+            rtol=1e-5,
+            atol=1e-5,
+        )
