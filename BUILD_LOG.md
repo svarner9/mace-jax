@@ -173,3 +173,19 @@ Before the fix, same run: valid E 466 / F 96 meV/Å, test E 464 / F 135 at epoch
 500-epoch run (external normalization, same E0 defect) ended at valid F 54 meV/Å with E 410
 meV/atom. With correct E0s the energies fit from epoch 2 and the forces converge about twice as
 fast: the readouts no longer spend capacity reproducing −100 eV/atom per element.
+
+## 2026-09-02 — GPU validation rerun after the E0 fix, MACE-LES water (job 16792158, L40S)
+
+Same `water_les.sbatch` (1000/200 frames, MACELES 128x0e+128x1o, float32, batch_size 6, 6 epochs),
+bundle now carries `atomic_energies = [−187.876, −93.938]` for Z = [1, 8]. 16.4 s/epoch train.
+
+| epoch | valid E (meV/atom) | valid F (meV/Å) |
+|---|---|---|
+| 1 | 8.7 | 123.5 |
+| 3 | 1.9 | 71.8 |
+| 6 | 1.2 | 40.4 |
+
+Before the fix at epoch 6: E 76.8 (a per-atom constant), F 68.4. Exported bundle on the 200
+validation frames via `mace_jax_eval_configs` (ASE path, per-structure k-grid): E 1.60 meV/atom,
+F 40.47 meV/Å. For scale: the full 400-epoch `water_les_d3` training on 15 344 frames reached
+0.21 meV/atom and 6.3 meV/Å.
